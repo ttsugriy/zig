@@ -2717,6 +2717,7 @@ fn addEnsureResult(gz: *GenZir, maybe_unused_result: Zir.Inst.Ref, statement: As
             .validate_deref,
             .save_err_ret_index,
             .restore_err_ret_index,
+            .async_call,
             => break :b true,
 
             .@"defer" => unreachable,
@@ -8486,7 +8487,7 @@ fn builtinCall(
             return rvalue(gz, ri, result, node);
         },
         .async_call => {
-            const result = try gz.addExtendedPayload(.builtin_async_call, Zir.Inst.AsyncCall{
+            const result = try gz.addExtendedPayload(.builtin_async_call, Zir.Inst.BuiltinAsyncCall{
                 .node = gz.nodeIndexToRelative(node),
                 .frame_buffer = try expr(gz, scope, .{ .rl = .none }, params[0]),
                 .result_ptr = try expr(gz, scope, .{ .rl = .none }, params[1]),

@@ -484,7 +484,7 @@ pub fn categorizeOperand(
             return .none;
         },
 
-        .call, .call_always_tail, .call_never_tail, .call_never_inline => {
+        .call, .call_always_tail, .call_never_tail, .call_never_inline, .call_async => {
             const inst_data = air_datas[inst].pl_op;
             const callee = inst_data.operand;
             const extra = air.extraData(Air.Call, inst_data.payload);

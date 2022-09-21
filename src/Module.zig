@@ -1626,6 +1626,7 @@ pub const Fn = struct {
     generic_owner_decl: Decl.OptionalIndex,
 
     state: Analysis,
+    async_status: AsyncStatus,
     is_cold: bool = false,
     is_noinline: bool,
     calls_or_awaits_errorable_fn: bool = false,
@@ -1649,6 +1650,12 @@ pub const Fn = struct {
         /// successfully complete semantic analysis.
         dependency_failure,
         success,
+    };
+
+    pub const AsyncStatus = enum {
+        unknown,
+        yes_async,
+        not_async,
     };
 
     /// This struct is used to keep track of any dependencies related to functions instances
@@ -1772,6 +1779,14 @@ pub const Fn = struct {
             },
             else => unreachable,
         }
+    }
+
+    pub fn isAsync(func: Fn) bool {
+        return switch (func.async_status) {
+            .unknown => unreachable,
+            .yes_async => true,
+            .not_async => false,
+        };
     }
 };
 
@@ -2484,6 +2499,36 @@ pub const SrcLoc = struct {
                 const full = tree.fullCall(&buf, node).?;
                 return nodeToSpan(tree, full.ast.fn_expr);
             },
+            .node_offset_async_call_func => |node_off| {
+                const tree = try src_loc.file_scope.getTree(gpa);
+                const node_tags = tree.nodes.items(.tag);
+                const node = src_loc.declRelativeToNodeIndex(node_off);
+                const var_decl: Ast.full.VarDecl = switch (node_tags[node]) {
+                    .global_var_decl => tree.globalVarDecl(node),
+                    .local_var_decl => tree.localVarDecl(node),
+                    .simple_var_decl => tree.simpleVarDecl(node),
+                    .aligned_var_decl => tree.alignedVarDecl(node),
+                    else => unreachable,
+                };
+                const init_node = var_decl.ast.init_node;
+                var params: [1]Ast.Node.Index = undefined;
+                const full = switch (node_tags[init_node]) {
+                    .call_one,
+                    .call_one_comma,
+                    .async_call_one,
+                    .async_call_one_comma,
+                    => tree.callOne(&params, init_node),
+
+                    .call,
+                    .call_comma,
+                    .async_call,
+                    .async_call_comma,
+                    => tree.callFull(init_node),
+
+                    else => unreachable,
+                };
+                return nodeToSpan(tree, full.ast.fn_expr);
+            },
             .node_offset_field_name => |node_off| {
                 const tree = try src_loc.file_scope.getTree(gpa);
                 const node_datas = tree.nodes.items(.data);
@@ -3080,6 +3125,14 @@ pub const LazySrcLoc = union(enum) {
     /// to the callee expression.
     /// The Decl is determined contextually.
     node_offset_call_func: i32,
+    /// Example:
+    ///   var a = async b();
+    ///                 ~
+    /// The source location points to the callee expression of a function call
+    /// expression of a variable declaration, found by taking this AST node
+    /// index offset from the containing Decl AST node, which points to the
+    /// variable declaration node. The Decl is determined contextually.
+    node_offset_async_call_func: i32,
     /// The payload is offset from the containing Decl AST node.
     /// The source location points to the field name of:
     ///  * a field access expression (`a.b`), or
@@ -3304,6 +3357,7 @@ pub const LazySrcLoc = union(enum) {
             .node_offset_slice_end,
             .node_offset_slice_sentinel,
             .node_offset_call_func,
+            .node_offset_async_call_func,
             .node_offset_field_name,
             .node_offset_deref_ptr,
             .node_offset_asm_source,

@@ -362,6 +362,7 @@ const Writer = struct {
             .export_value => try self.writePlNodeExportValue(stream, inst),
 
             .call => try self.writeCall(stream, inst),
+            .async_call => try self.writeAsyncCall(stream, inst),
 
             .block,
             .block_comptime,
@@ -833,7 +834,7 @@ const Writer = struct {
     }
 
     fn writeBuiltinAsyncCall(self: *Writer, stream: anytype, extended: Zir.Inst.Extended.InstData) !void {
-        const extra = self.code.extraData(Zir.Inst.AsyncCall, extended.operand).data;
+        const extra = self.code.extraData(Zir.Inst.BuiltinAsyncCall, extended.operand).data;
         try self.writeInstRef(stream, extra.frame_buffer);
         try stream.writeAll(", ");
         try self.writeInstRef(stream, extra.result_ptr);
@@ -1161,12 +1162,36 @@ const Writer = struct {
         const extra = self.code.extraData(Zir.Inst.Call, inst_data.payload_index);
         const args_len = extra.data.flags.args_len;
         const body = self.code.extra[extra.end..];
+        const callee = extra.data.callee;
+        const modifier = @intToEnum(std.builtin.CallOptions.Modifier, extra.data.flags.packed_modifier);
 
         if (extra.data.flags.ensure_result_used) {
             try stream.writeAll("nodiscard ");
         }
-        try stream.print(".{s}, ", .{@tagName(@intToEnum(std.builtin.CallModifier, extra.data.flags.packed_modifier))});
-        try self.writeInstRef(stream, extra.data.callee);
+        return finishWriteCall(self, stream, callee, body, args_len, modifier, extra.end, inst_data.src());
+    }
+
+    fn writeAsyncCall(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {
+        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
+        const extra = self.code.extraData(Zir.Inst.AsyncCall, inst_data.payload_index);
+        const args_len = extra.data.args_len;
+        const body = self.code.extra[extra.end..];
+        const callee = extra.data.callee;
+        return finishWriteCall(self, stream, callee, body, args_len, .async_kw, extra.end, inst_data.src());
+    }
+
+    fn finishWriteCall(
+        self: *Writer,
+        stream: anytype,
+        callee: Zir.Inst.Ref,
+        body: []const Zir.Inst.Index,
+        args_len: u32,
+        modifier: std.builtin.CallModifier,
+        extra_end: usize,
+        src: Module.LazySrcLoc,
+    ) !void {
+        try stream.print(".{s}, ", .{@tagName(modifier)});
+        try self.writeInstRef(stream, callee);
         try stream.writeAll(", [");
 
         self.indent += 2;
@@ -1177,7 +1202,7 @@ const Writer = struct {
         var arg_start: u32 = args_len;
         while (i < args_len) : (i += 1) {
             try stream.writeByteNTimes(' ', self.indent);
-            const arg_end = self.code.extra[extra.end + i];
+            const arg_end = self.code.extra[extra_end + i];
             defer arg_start = arg_end;
             const arg_body = body[arg_start..arg_end];
             try self.writeBracedBody(stream, arg_body);
@@ -1190,7 +1215,7 @@ const Writer = struct {
         }
 
         try stream.writeAll("]) ");
-        try self.writeSrc(stream, inst_data.src());
+        try self.writeSrc(stream, src);
     }
 
     fn writeBlock(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {

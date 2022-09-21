@@ -1886,6 +1886,7 @@ fn genInst(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .call_always_tail => func.airCall(inst, .always_tail),
         .call_never_tail => func.airCall(inst, .never_tail),
         .call_never_inline => func.airCall(inst, .never_inline),
+        .call_async => func.airCall(inst, .async_kw),
 
         .is_err => func.airIsErr(inst, .i32_ne),
         .is_non_err => func.airIsErr(inst, .i32_eq),
@@ -2129,11 +2130,12 @@ fn airRetLoad(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     return func.finishAir(inst, .none, &.{un_op});
 }
 
-fn airCall(func: *CodeGen, inst: Air.Inst.Index, modifier: std.builtin.CallModifier) InnerError!void {
+fn airCall(func: *CodeGen, inst: Air.Inst.Index, modifier: std.builtin.CallModifier) InnerError!WValue {
     if (modifier == .always_tail) return func.fail("TODO implement tail calls for wasm", .{});
+    if (modifier == .async_kw) return func.fail("TODO implement async calls for wasm", .{});
     const pl_op = func.air.instructions.items(.data)[inst].pl_op;
     const extra = func.air.extraData(Air.Call, pl_op.payload);
-    const args = @ptrCast([]const Air.Inst.Ref, func.air.extra[extra.end..][0..extra.data.args_len]);
+    const args = func.air.extra[extra.end..][0..extra.data.args_len];
     const ty = func.air.typeOf(pl_op.operand);
 
     const fn_ty = switch (ty.zigTypeTag()) {

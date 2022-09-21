@@ -301,6 +301,11 @@ pub const Inst = struct {
         /// Uses the `pl_node` union field with payload `BuiltinCall`.
         /// AST node is the builtin call.
         builtin_call,
+        /// An async function call that also acts as an alloc. Corresponds with
+        /// the syntax `var foo = async bar();`.
+        /// Uses the `pl_node` union field with payload `AsyncCall`
+        /// AST node is the entire variable declaration, with the init node being a call.
+        async_call,
         /// `<`
         /// Uses the `pl_node` union field. Payload is `Bin`.
         cmp_lt,
@@ -1047,6 +1052,7 @@ pub const Inst = struct {
                 .bool_br_or,
                 .bool_not,
                 .call,
+                .async_call,
                 .cmp_lt,
                 .cmp_lte,
                 .cmp_eq,
@@ -1356,6 +1362,7 @@ pub const Inst = struct {
                 .bool_br_or,
                 .bool_not,
                 .call,
+                .async_call,
                 .cmp_lt,
                 .cmp_lte,
                 .cmp_eq,
@@ -1595,6 +1602,7 @@ pub const Inst = struct {
                 .check_comptime_control_flow = .un_node,
                 .for_len = .pl_node,
                 .call = .pl_node,
+                .async_call = .pl_node,
                 .cmp_lt = .pl_node,
                 .cmp_lte = .pl_node,
                 .cmp_eq = .pl_node,
@@ -1982,7 +1990,7 @@ pub const Inst = struct {
         /// `small` contains `NameStrategy`.
         reify,
         /// Implements the `@asyncCall` builtin.
-        /// `operand` is payload index to `AsyncCall`.
+        /// `operand` is payload index to `BuiltinAsyncCall`.
         builtin_async_call,
         /// Implements the `@cmpxchgStrong` and `@cmpxchgWeak` builtins.
         /// `small` 0=>weak 1=>strong
@@ -2888,6 +2896,16 @@ pub const Inst = struct {
         };
     };
 
+    /// Not to be confused with BuiltinAsyncCall.
+    /// Stored inside extra, with trailing arguments according to `args_len`.
+    /// Implicit 0. arg_0_start: u32, // always same as `args_len`
+    /// 1. arg_end: u32, // for each `args_len`
+    /// arg_N_start is the same as arg_N-1_end
+    pub const AsyncCall = struct {
+        callee: Ref,
+        args_len: u32,
+    };
+
     pub const TypeOfPeer = struct {
         src_node: i32,
         body_len: u32,
@@ -3516,7 +3534,8 @@ pub const Inst = struct {
         b: Ref,
     };
 
-    pub const AsyncCall = struct {
+    /// Not to be confused with AsyncCall.
+    pub const BuiltinAsyncCall = struct {
         node: i32,
         frame_buffer: Ref,
         result_ptr: Ref,
