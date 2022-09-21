@@ -3203,11 +3203,17 @@ fn varDecl(
             } else a: {
                 const alloc = alloc: {
                     if (align_inst == .none) {
-                        const tag: Zir.Inst.Tag = if (is_comptime)
-                            .alloc_inferred_comptime_mut
-                        else
-                            .alloc_inferred_mut;
-                        break :alloc try gz.addNode(tag, node);
+                        var params: [1]Ast.Node.Index = undefined;
+                        if (is_comptime) {
+                            break :alloc try gz.addNode(.alloc_inferred_comptime_mut, node);
+                        } else {
+                            if (nodeGetCall(tree, var_decl.ast.init_node, &params)) |call| {
+                                if (call.async_token != null) {
+                                    return asyncCallExpr(gz, scope, node, call, ident_name, block_arena, name_token);
+                                }
+                            }
+                            break :alloc try gz.addNode(.alloc_inferred_mut, node);
+                        }
                     } else {
                         break :alloc try gz.addAllocExtended(.{
                             .node = node,
@@ -3246,6 +3252,34 @@ fn varDecl(
         },
         else => unreachable,
     }
+}
+
+fn asyncCallExpr(
+    gz: *GenZir,
+    scope: *Scope,
+    node: Ast.Node.Index,
+    call: Ast.full.Call,
+    ident_name: u32,
+    block_arena: Allocator,
+    name_token: Ast.TokenIndex,
+) InnerError!*Scope {
+    gz.rl_ty_inst = .none;
+
+    const call_inst = try callExprInner(gz, scope, node, call, .async_kw, false, Zir.Inst.AsyncCall);
+
+    try gz.addDbgVar(.dbg_var_ptr, ident_name, call_inst);
+
+    const sub_scope = try block_arena.create(Scope.LocalPtr);
+    sub_scope.* = .{
+        .parent = scope,
+        .gen_zir = gz,
+        .name = ident_name,
+        .ptr = call_inst,
+        .token_src = name_token,
+        .maybe_comptime = false,
+        .id_cat = .@"local variable",
+    };
+    return &sub_scope.base;
 }
 
 fn emitDbgNode(gz: *GenZir, node: Ast.Node.Index) !void {
@@ -8861,9 +8895,6 @@ fn callExpr(
     node: Ast.Node.Index,
     call: Ast.full.Call,
 ) InnerError!Zir.Inst.Ref {
-    const astgen = gz.astgen;
-
-    const callee = try calleeExpr(gz, scope, call.ast.fn_expr);
     const modifier: std.builtin.CallModifier = blk: {
         if (gz.is_comptime) {
             break :blk .compile_time;
@@ -8876,6 +8907,29 @@ fn callExpr(
         }
         break :blk .auto;
     };
+
+    // If our result location is a try/catch/error-union-if/return, a function argument,
+    // or an initializer for a `const` variable, the error trace propagates.
+    // Otherwise, it should always be popped (handled in Sema).
+    const propagate_error_trace = switch (ri.ctx) {
+        .error_handling_expr, .@"return", .fn_arg, .const_init => true,
+        else => false,
+    };
+    const call_inst = try callExprInner(gz, scope, node, call, modifier, propagate_error_trace, Zir.Inst.Call);
+    return rvalue(gz, ri, call_inst, node); // TODO function call with result location
+}
+
+fn callExprInner(
+    gz: *GenZir,
+    scope: *Scope,
+    node: Ast.Node.Index,
+    call: Ast.full.Call,
+    modifier: std.builtin.CallOptions.Modifier,
+    propagate_error_trace: bool,
+    comptime Payload: type,
+) InnerError!Zir.Inst.Ref {
+    const astgen = gz.astgen;
+    const callee = try calleeExpr(gz, scope, call.ast.fn_expr);
 
     {
         astgen.advanceSourceCursor(astgen.tree.tokens.items(.start)[call.ast.lparen]);
@@ -8921,33 +8975,36 @@ fn callExpr(
         scratch_index += 1;
     }
 
-    // If our result location is a try/catch/error-union-if/return, a function argument,
-    // or an initializer for a `const` variable, the error trace propagates.
-    // Otherwise, it should always be popped (handled in Sema).
-    const propagate_error_trace = switch (ri.ctx) {
-        .error_handling_expr, .@"return", .fn_arg, .const_init => true,
-        else => false,
-    };
-
-    const payload_index = try addExtra(astgen, Zir.Inst.Call{
-        .callee = callee,
-        .flags = .{
-            .pop_error_return_trace = !propagate_error_trace,
-            .packed_modifier = @intCast(Zir.Inst.Call.Flags.PackedModifier, @enumToInt(modifier)),
-            .args_len = @intCast(Zir.Inst.Call.Flags.PackedArgsLen, call.ast.params.len),
+    const payload_index = try addExtra(astgen, switch (Payload) {
+        Zir.Inst.AsyncCall => Payload{
+            .callee = callee,
+            .args_len = @intCast(u32, call.ast.params.len),
         },
+        Zir.Inst.Call => Payload{
+            .callee = callee,
+            .flags = .{
+                .pop_error_return_trace = !propagate_error_trace,
+                .packed_modifier = @intCast(Zir.Inst.Call.Flags.PackedModifier, @enumToInt(modifier)),
+                .args_len = @intCast(Zir.Inst.Call.Flags.PackedArgsLen, call.ast.params.len),
+            },
+        },
+        else => @compileError("bad payload type"),
     });
     if (call.ast.params.len != 0) {
         try astgen.extra.appendSlice(astgen.gpa, astgen.scratch.items[scratch_top..]);
     }
     gz.astgen.instructions.set(call_index, .{
-        .tag = .call,
+        .tag = switch (Payload) {
+            Zir.Inst.AsyncCall => .async_call,
+            Zir.Inst.Call => .call,
+            else => @compileError("bad payload type"),
+        },
         .data = .{ .pl_node = .{
             .src_node = gz.nodeIndexToRelative(node),
             .payload_index = payload_index,
         } },
     });
-    return rvalue(gz, ri, call_inst, node); // TODO function call with result location
+    return call_inst;
 }
 
 /// calleeExpr generates the function part of a call expression (f in f(x)), or the
@@ -10089,6 +10146,29 @@ fn nodeUsesAnonNameStrategy(tree: *const Ast, node: Ast.Node.Index) bool {
             return std.mem.eql(u8, builtin_name, "@Type");
         },
         else => return false,
+    }
+}
+
+fn nodeGetCall(
+    tree: *const Ast,
+    start_node: Ast.Node.Index,
+    params: *[1]Ast.Node.Index,
+) ?Ast.full.Call {
+    const node_tags = tree.nodes.items(.tag);
+    const node_datas = tree.nodes.items(.data);
+
+    var node = start_node;
+    while (true) {
+        switch (node_tags[node]) {
+            .call_one, .call_one_comma, .async_call_one, .async_call_one_comma => {
+                return tree.callOne(params, node);
+            },
+            .call, .call_comma, .async_call, .async_call_comma => {
+                return tree.callFull(node);
+            },
+            .grouped_expression => node = node_datas[node].lhs,
+            else => return null,
+        }
     }
 }
 

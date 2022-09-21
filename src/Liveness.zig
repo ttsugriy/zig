@@ -484,7 +484,7 @@ pub fn categorizeOperand(
             return .none;
         },
 
-        .call, .call_always_tail, .call_never_tail, .call_never_inline, .call_async => {
+        .call, .call_always_tail, .call_never_tail, .call_never_inline => {
             const inst_data = air_datas[inst].pl_op;
             const callee = inst_data.operand;
             const extra = air.extraData(Air.Call, inst_data.payload);
@@ -497,6 +497,40 @@ pub fn categorizeOperand(
                 return .write;
             }
             var bt = l.iterateBigTomb(inst);
+            if (bt.feed()) {
+                if (callee == operand_ref) return .tomb;
+            } else {
+                if (callee == operand_ref) return .write;
+            }
+            for (args) |arg| {
+                if (bt.feed()) {
+                    if (arg == operand_ref) return .tomb;
+                } else {
+                    if (arg == operand_ref) return .write;
+                }
+            }
+            return .write;
+        },
+        .call_async => {
+            const inst_data = air_datas[inst].ty_pl;
+            const extra = air.extraData(Air.AsyncCall, inst_data.payload);
+            const callee = extra.data.callee;
+            const frame_ptr = extra.data.frame_ptr;
+            const args = @ptrCast([]const Air.Inst.Ref, air.extra[extra.end..][0..extra.data.args_len]);
+            if (args.len + 2 <= bpi - 1) {
+                if (frame_ptr == operand_ref) return matchOperandSmallIndex(l, inst, 0, .write);
+                if (callee == operand_ref) return matchOperandSmallIndex(l, inst, 1, .write);
+                for (args, 0..) |arg, i| {
+                    if (arg == operand_ref) return matchOperandSmallIndex(l, inst, @intCast(OperandInt, i + 2), .write);
+                }
+                return .write;
+            }
+            var bt = l.iterateBigTomb(inst);
+            if (bt.feed()) {
+                if (frame_ptr == operand_ref) return .tomb;
+            } else {
+                if (frame_ptr == operand_ref) return .write;
+            }
             if (bt.feed()) {
                 if (callee == operand_ref) return .tomb;
             } else {

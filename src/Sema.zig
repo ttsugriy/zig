@@ -403,11 +403,7 @@ pub const Block = struct {
         return block.namespace.file_scope;
     }
 
-    fn addTy(
-        block: *Block,
-        tag: Air.Inst.Tag,
-        ty: Type,
-    ) error{OutOfMemory}!Air.Inst.Ref {
+    fn addTy(block: *Block, tag: Air.Inst.Tag, ty: Type) error{OutOfMemory}!Air.Inst.Ref {
         return block.addInst(.{
             .tag = tag,
             .data = .{ .ty = ty },
@@ -7077,8 +7073,14 @@ fn addAsyncCallInst(
     callee_fn: *Module.Fn,
     args: []const Air.Inst.Ref,
 ) Allocator.Error!Air.Inst.Ref {
-    const frame_ty = try Type.asyncFrame(sema.arena, callee_fn);
-    const frame_ty_ref = try sema.addType(frame_ty);
+    const target = sema.mod.getTarget();
+    const ptr_frame_ty = try Type.ptr(sema.arena, sema.mod, .{
+        .pointee_type = try Type.asyncFrame(sema.arena, callee_fn),
+        .mutable = true,
+        .@"addrspace" = target_util.defaultAddressSpace(target, .local),
+    });
+    const frame_ptr = try block.addTy(.alloc, ptr_frame_ty);
+    const ptr_frame_ty_ref = try sema.addType(ptr_frame_ty);
     try sema.air_extra.ensureUnusedCapacity(
         sema.gpa,
         @typeInfo(Air.AsyncCall).Struct.fields.len + args.len,
@@ -7086,8 +7088,9 @@ fn addAsyncCallInst(
     const call_inst = try block.addInst(.{
         .tag = .call_async,
         .data = .{ .ty_pl = .{
-            .ty = frame_ty_ref,
+            .ty = ptr_frame_ty_ref,
             .payload = sema.addExtraAssumeCapacity(Air.AsyncCall{
+                .frame_ptr = frame_ptr,
                 .callee = callee,
                 .args_len = @intCast(u32, args.len),
             }),

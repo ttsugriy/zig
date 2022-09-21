@@ -815,6 +815,7 @@ pub const Type = extern union {
 
             .async_frame => {
                 const a_fn = a.castTag(.async_frame).?.data;
+                if (b.zigTypeTag() != .Frame) return false;
                 const b_fn = b.castTag(.async_frame).?.data;
                 return a_fn == b_fn;
             },
