@@ -2400,7 +2400,24 @@ pub const Object = struct {
             .Null => unreachable,
             .EnumLiteral => unreachable,
 
-            .Frame => @panic("TODO implement lowerDebugType for Frame types"),
+            .Frame => {
+                // TODO make this more useful than just a pointer to u8
+                // TODO this also does not account for async functions with
+                // any spilled locals that are aligned to more than 16 bytes
+                const elem_di_ty = try o.lowerDebugType(Type.u8, .full);
+                const name = try ty.nameAlloc(gpa, o.module);
+                defer gpa.free(name);
+                const ptr_di_ty = dib.createPointerType(
+                    elem_di_ty,
+                    target.cpu.arch.ptrBitWidth(),
+                    target.cpu.arch.ptrBitWidth() * 2, // alignment
+                    name,
+                );
+                // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
+                try o.di_type_map.putContext(gpa, ty, AnnotatedDITypePtr.initFull(ptr_di_ty), .{ .mod = o.module });
+                return ptr_di_ty;
+            },
+
             .AnyFrame => @panic("TODO implement lowerDebugType for AnyFrame types"),
         }
     }
@@ -3178,6 +3195,17 @@ pub const DeclGen = struct {
             },
             .AnyFrame => return dg.context.pointerType(0),
         }
+    }
+
+    fn lowerAsyncFrameHeader(dg: *DeclGen, ret_ty: Type) !*llvm.Type {
+        const opaque_ptr_ty = dg.context.pointerType(0);
+        const l = asyncFrameLayout();
+        var fields: [4]*llvm.Type = undefined;
+        fields[l.fn_ptr] = opaque_ptr_ty;
+        fields[l.resume_index] = try dg.lowerType(Type.usize);
+        fields[l.awaiter] = opaque_ptr_ty;
+        fields[l.ret_val] = try dg.lowerType(ret_ty);
+        return dg.context.structType(&fields, fields.len, .False);
     }
 
     fn lowerAsyncFrameType(
@@ -4531,6 +4559,10 @@ pub const FuncGen = struct {
         return self.dg.todo(format, args);
     }
 
+    fn getTarget(fg: FuncGen) std.Target {
+        return fg.dg.module.getTarget();
+    }
+
     fn llvmModule(self: *FuncGen) *llvm.Module {
         return self.dg.object.llvm_module;
     }
@@ -4847,168 +4879,13 @@ pub const FuncGen = struct {
             break :blk ret_ptr;
         };
 
-        const err_return_tracing = fn_info.return_type.isError() and
+        const err_return_tracing = return_type.isError() and
             self.dg.module.comp.bin_file.options.error_return_tracing;
         if (err_return_tracing) {
             try llvm_args.append(self.err_ret_trace.?);
         }
 
-        var it = iterateParamTypes(self.dg, fn_info);
-        while (it.nextCall(self, args)) |lowering| switch (lowering) {
-            .no_bits => continue,
-            .byval => {
-                const arg = args[it.zig_index - 1];
-                const param_ty = self.air.typeOf(arg);
-                const llvm_arg = try self.resolveInst(arg);
-                const llvm_param_ty = try self.dg.lowerType(param_ty);
-                if (isByRef(param_ty)) {
-                    const alignment = param_ty.abiAlignment(target);
-                    const load_inst = self.builder.buildLoad(llvm_param_ty, llvm_arg, "");
-                    load_inst.setAlignment(alignment);
-                    try llvm_args.append(load_inst);
-                } else {
-                    try llvm_args.append(llvm_arg);
-                }
-            },
-            .byref => {
-                const arg = args[it.zig_index - 1];
-                const param_ty = self.air.typeOf(arg);
-                const llvm_arg = try self.resolveInst(arg);
-                if (isByRef(param_ty)) {
-                    try llvm_args.append(llvm_arg);
-                } else {
-                    const alignment = param_ty.abiAlignment(target);
-                    const param_llvm_ty = llvm_arg.typeOf();
-                    const arg_ptr = self.buildAlloca(param_llvm_ty, alignment);
-                    const store_inst = self.builder.buildStore(llvm_arg, arg_ptr);
-                    store_inst.setAlignment(alignment);
-                    try llvm_args.append(arg_ptr);
-                }
-            },
-            .byref_mut => {
-                const arg = args[it.zig_index - 1];
-                const param_ty = self.air.typeOf(arg);
-                const llvm_arg = try self.resolveInst(arg);
-
-                const alignment = param_ty.abiAlignment(target);
-                const param_llvm_ty = try self.dg.lowerType(param_ty);
-                const arg_ptr = self.buildAlloca(param_llvm_ty, alignment);
-                if (isByRef(param_ty)) {
-                    const load_inst = self.builder.buildLoad(param_llvm_ty, llvm_arg, "");
-                    load_inst.setAlignment(alignment);
-
-                    const store_inst = self.builder.buildStore(load_inst, arg_ptr);
-                    store_inst.setAlignment(alignment);
-                    try llvm_args.append(arg_ptr);
-                } else {
-                    const store_inst = self.builder.buildStore(llvm_arg, arg_ptr);
-                    store_inst.setAlignment(alignment);
-                    try llvm_args.append(arg_ptr);
-                }
-            },
-            .abi_sized_int => {
-                const arg = args[it.zig_index - 1];
-                const param_ty = self.air.typeOf(arg);
-                const llvm_arg = try self.resolveInst(arg);
-                const abi_size = @intCast(c_uint, param_ty.abiSize(target));
-                const int_llvm_ty = self.context.intType(abi_size * 8);
-
-                if (isByRef(param_ty)) {
-                    const alignment = param_ty.abiAlignment(target);
-                    const load_inst = self.builder.buildLoad(int_llvm_ty, llvm_arg, "");
-                    load_inst.setAlignment(alignment);
-                    try llvm_args.append(load_inst);
-                } else {
-                    // LLVM does not allow bitcasting structs so we must allocate
-                    // a local, store as one type, and then load as another type.
-                    const alignment = @max(
-                        param_ty.abiAlignment(target),
-                        self.dg.object.target_data.abiAlignmentOfType(int_llvm_ty),
-                    );
-                    const int_ptr = self.buildAlloca(int_llvm_ty, alignment);
-                    const store_inst = self.builder.buildStore(llvm_arg, int_ptr);
-                    store_inst.setAlignment(alignment);
-                    const load_inst = self.builder.buildLoad(int_llvm_ty, int_ptr, "");
-                    load_inst.setAlignment(alignment);
-                    try llvm_args.append(load_inst);
-                }
-            },
-            .slice => {
-                const arg = args[it.zig_index - 1];
-                const llvm_arg = try self.resolveInst(arg);
-                const ptr = self.builder.buildExtractValue(llvm_arg, 0, "");
-                const len = self.builder.buildExtractValue(llvm_arg, 1, "");
-                try llvm_args.ensureUnusedCapacity(2);
-                llvm_args.appendAssumeCapacity(ptr);
-                llvm_args.appendAssumeCapacity(len);
-            },
-            .multiple_llvm_types => {
-                const arg = args[it.zig_index - 1];
-                const param_ty = self.air.typeOf(arg);
-                const llvm_types = it.llvm_types_buffer[0..it.llvm_types_len];
-                const llvm_arg = try self.resolveInst(arg);
-                const is_by_ref = isByRef(param_ty);
-                const arg_ptr = if (is_by_ref) llvm_arg else p: {
-                    const p = self.buildAlloca(llvm_arg.typeOf(), null);
-                    const store_inst = self.builder.buildStore(llvm_arg, p);
-                    store_inst.setAlignment(param_ty.abiAlignment(target));
-                    break :p p;
-                };
-
-                const llvm_ty = self.context.structType(llvm_types.ptr, @intCast(c_uint, llvm_types.len), .False);
-                try llvm_args.ensureUnusedCapacity(it.llvm_types_len);
-                for (llvm_types, 0..) |field_ty, i_usize| {
-                    const i = @intCast(c_uint, i_usize);
-                    const field_ptr = self.builder.buildStructGEP(llvm_ty, arg_ptr, i, "");
-                    const load_inst = self.builder.buildLoad(field_ty, field_ptr, "");
-                    load_inst.setAlignment(target.cpu.arch.ptrBitWidth() / 8);
-                    llvm_args.appendAssumeCapacity(load_inst);
-                }
-            },
-            .as_u16 => {
-                const arg = args[it.zig_index - 1];
-                const llvm_arg = try self.resolveInst(arg);
-                const casted = self.builder.buildBitCast(llvm_arg, self.context.intType(16), "");
-                try llvm_args.append(casted);
-            },
-            .float_array => |count| {
-                const arg = args[it.zig_index - 1];
-                const arg_ty = self.air.typeOf(arg);
-                var llvm_arg = try self.resolveInst(arg);
-                if (!isByRef(arg_ty)) {
-                    const p = self.buildAlloca(llvm_arg.typeOf(), null);
-                    const store_inst = self.builder.buildStore(llvm_arg, p);
-                    store_inst.setAlignment(arg_ty.abiAlignment(target));
-                    llvm_arg = store_inst;
-                }
-
-                const float_ty = try self.dg.lowerType(aarch64_c_abi.getFloatArrayType(arg_ty).?);
-                const array_llvm_ty = float_ty.arrayType(count);
-
-                const alignment = arg_ty.abiAlignment(target);
-                const load_inst = self.builder.buildLoad(array_llvm_ty, llvm_arg, "");
-                load_inst.setAlignment(alignment);
-                try llvm_args.append(load_inst);
-            },
-            .i32_array, .i64_array => |arr_len| {
-                const elem_size: u8 = if (lowering == .i32_array) 32 else 64;
-                const arg = args[it.zig_index - 1];
-                const arg_ty = self.air.typeOf(arg);
-                var llvm_arg = try self.resolveInst(arg);
-                if (!isByRef(arg_ty)) {
-                    const p = self.buildAlloca(llvm_arg.typeOf(), null);
-                    const store_inst = self.builder.buildStore(llvm_arg, p);
-                    store_inst.setAlignment(arg_ty.abiAlignment(target));
-                    llvm_arg = store_inst;
-                }
-
-                const array_llvm_ty = self.context.intType(elem_size).arrayType(arr_len);
-                const alignment = arg_ty.abiAlignment(target);
-                const load_inst = self.builder.buildLoad(array_llvm_ty, llvm_arg, "");
-                load_inst.setAlignment(alignment);
-                try llvm_args.append(load_inst);
-            },
-        };
+        try addCallArgs(self, args, &llvm_args, fn_info);
 
         const call = self.builder.buildCall(
             try self.dg.lowerType(zig_fn_ty),
@@ -5022,7 +4899,7 @@ pub const FuncGen = struct {
 
         if (callee_ty.zigTypeTag() == .Pointer) {
             // Add argument attributes for function pointer calls.
-            it = iterateParamTypes(self.dg, fn_info);
+            var it = iterateParamTypes(self.dg, fn_info);
             it.llvm_index += @boolToInt(sret);
             it.llvm_index += @boolToInt(err_return_tracing);
             while (it.next()) |lowering| switch (lowering) {
@@ -5140,9 +5017,278 @@ pub const FuncGen = struct {
         return self.todo("lower call_async", .{});
     }
 
-    fn airCallAsyncAlloc(self: *FuncGen, inst: Air.Inst.Index) !?*llvm.Value {
-        _ = inst;
-        return self.todo("lower call_async_alloc", .{});
+    fn airCallAsyncAlloc(fg: *FuncGen, inst: Air.Inst.Index) !?*llvm.Value {
+        const ty_pl = fg.air.instructions.items(.data)[inst].ty_pl;
+        const extra = fg.air.extraData(Air.AsyncCallAlloc, ty_pl.payload);
+        const args = @ptrCast([]const Air.Inst.Ref, fg.air.extra[extra.end..][0..extra.data.args_len]);
+        const callee = try fg.resolveInst(extra.data.callee);
+        const callee_ty = fg.air.typeOf(extra.data.callee);
+        const zig_fn_ty = switch (callee_ty.zigTypeTag()) {
+            .Fn => callee_ty,
+            .Pointer => callee_ty.childType(),
+            else => unreachable,
+        };
+        const fn_info = zig_fn_ty.fnInfo();
+        // Remember that we want to lower calls to functions which have not yet
+        // been semantically analyzed. So we must not call lowerType on the
+        // frame type. Instead we runtime-call a function to learn the frame
+        // size of the callee, allocate that many bytes, and then pointer-cast
+        // it to the anytype->T header that we know based on the type alone.
+        const target = fg.getTarget();
+        const llvm_i8 = fg.dg.context.intType(8);
+        const frame_size = fg.genFrameSize(callee);
+        const frame_alloca = fg.builder.buildArrayAlloca(llvm_i8, frame_size, "");
+        frame_alloca.setAlignment(target.cpu.arch.ptrBitWidth() / 4);
+        const frame_llvm_ty = try fg.dg.lowerAsyncFrameHeader(fn_info.return_type);
+        const frame_ptr = fg.builder.buildBitCast(frame_alloca, frame_llvm_ty.pointerType(0), "");
+        const l = asyncFrameLayout();
+        const fn_ptr_ptr = fg.builder.buildStructGEP(frame_llvm_ty, frame_ptr, l.fn_ptr, "");
+        _ = fg.builder.buildStore(callee, fn_ptr_ptr);
+
+        const resume_index_ptr = fg.builder.buildStructGEP(frame_llvm_ty, frame_ptr, l.resume_index, "");
+        const llvm_usize = fg.dg.context.intType(target.cpu.arch.ptrBitWidth());
+        const zero = llvm_usize.constNull();
+        _ = fg.builder.buildStore(zero, resume_index_ptr);
+
+        const awaiter_ptr = fg.builder.buildStructGEP(frame_llvm_ty, frame_ptr, l.awaiter, "");
+        _ = fg.builder.buildStore(zero, awaiter_ptr);
+
+        var llvm_args = std.ArrayList(*llvm.Value).init(fg.gpa);
+        defer llvm_args.deinit();
+
+        try addCallArgs(fg, args, &llvm_args, fn_info);
+
+        _ = fg.builder.buildCall(
+            try fg.dg.lowerType(zig_fn_ty),
+            callee,
+            llvm_args.items.ptr,
+            @intCast(c_uint, llvm_args.items.len),
+            .Fast,
+            .Auto,
+            "",
+        );
+
+        return frame_ptr;
+    }
+
+    fn addCallArgs(
+        fg: *FuncGen,
+        args: []const Air.Inst.Ref,
+        llvm_args: *std.ArrayList(*llvm.Value),
+        fn_info: Type.Payload.Function.Data,
+    ) !void {
+        const target = fg.getTarget();
+        var it = iterateParamTypes(fg.dg, fn_info);
+        while (it.nextCall(fg, args)) |lowering| switch (lowering) {
+            .no_bits => continue,
+            .byval => {
+                const arg = args[it.zig_index - 1];
+                const param_ty = fg.air.typeOf(arg);
+                const llvm_arg = try fg.resolveInst(arg);
+                const llvm_param_ty = try fg.dg.lowerType(param_ty);
+                if (isByRef(param_ty)) {
+                    const alignment = param_ty.abiAlignment(target);
+                    const load_inst = fg.builder.buildLoad(llvm_param_ty, llvm_arg, "");
+                    load_inst.setAlignment(alignment);
+                    try llvm_args.append(load_inst);
+                } else {
+                    if (param_ty.zigTypeTag() == .Pointer) {
+                        // We need a bitcast in case of two possibilities:
+                        // 1. The parameter type is a pointer to zero-sized type,
+                        //    which is always lowered to an LLVM type of `*i8`.
+                        // 2. The argument is a global which does act as a pointer, however
+                        //    a bitcast is needed in order for the LLVM types to match.
+                        const casted_ptr = fg.builder.buildBitCast(llvm_arg, llvm_param_ty, "");
+                        try llvm_args.append(casted_ptr);
+                    } else {
+                        try llvm_args.append(llvm_arg);
+                    }
+                }
+            },
+            .byref => {
+                const arg = args[it.zig_index - 1];
+                const param_ty = fg.air.typeOf(arg);
+                const llvm_arg = try fg.resolveInst(arg);
+                if (isByRef(param_ty)) {
+                    try llvm_args.append(llvm_arg);
+                } else {
+                    const alignment = param_ty.abiAlignment(target);
+                    const param_llvm_ty = llvm_arg.typeOf();
+                    const arg_ptr = fg.buildAlloca(param_llvm_ty, alignment);
+                    const store_inst = fg.builder.buildStore(llvm_arg, arg_ptr);
+                    store_inst.setAlignment(alignment);
+                    try llvm_args.append(arg_ptr);
+                }
+            },
+            .abi_sized_int => {
+                const arg = args[it.zig_index - 1];
+                const param_ty = fg.air.typeOf(arg);
+                const llvm_arg = try fg.resolveInst(arg);
+                const abi_size = @intCast(c_uint, param_ty.abiSize(target));
+                const int_llvm_ty = fg.dg.context.intType(abi_size * 8);
+                const int_ptr_llvm_ty = int_llvm_ty.pointerType(0);
+
+                if (isByRef(param_ty)) {
+                    const alignment = param_ty.abiAlignment(target);
+                    const casted_ptr = fg.builder.buildBitCast(llvm_arg, int_ptr_llvm_ty, "");
+                    const load_inst = fg.builder.buildLoad(int_llvm_ty, casted_ptr, "");
+                    load_inst.setAlignment(alignment);
+                    try llvm_args.append(load_inst);
+                } else {
+                    // LLVM does not allow bitcasting structs so we must allocate
+                    // a local, bitcast its pointer, store, and then load.
+                    const alignment = @max(
+                        param_ty.abiAlignment(target),
+                        fg.dg.object.target_data.abiAlignmentOfType(int_llvm_ty),
+                    );
+                    const int_ptr = fg.buildAlloca(int_llvm_ty, alignment);
+                    const param_llvm_ty = try fg.dg.lowerType(param_ty);
+                    const casted_ptr = fg.builder.buildBitCast(int_ptr, param_llvm_ty.pointerType(0), "");
+                    const store_inst = fg.builder.buildStore(llvm_arg, casted_ptr);
+                    store_inst.setAlignment(alignment);
+                    const load_inst = fg.builder.buildLoad(int_llvm_ty, int_ptr, "");
+                    load_inst.setAlignment(alignment);
+                    try llvm_args.append(load_inst);
+                }
+            },
+            .slice => {
+                const arg = args[it.zig_index - 1];
+                const llvm_arg = try fg.resolveInst(arg);
+                const ptr = fg.builder.buildExtractValue(llvm_arg, 0, "");
+                const len = fg.builder.buildExtractValue(llvm_arg, 1, "");
+                try llvm_args.ensureUnusedCapacity(2);
+                llvm_args.appendAssumeCapacity(ptr);
+                llvm_args.appendAssumeCapacity(len);
+            },
+            .multiple_llvm_ints => {
+                const arg = args[it.zig_index - 1];
+                const param_ty = fg.air.typeOf(arg);
+                const llvm_ints = it.llvm_types_buffer[0..it.llvm_types_len];
+                const llvm_arg = try fg.resolveInst(arg);
+                const is_by_ref = isByRef(param_ty);
+                const arg_ptr = if (is_by_ref) llvm_arg else p: {
+                    const p = fg.buildAlloca(llvm_arg.typeOf(), null);
+                    const store_inst = fg.builder.buildStore(llvm_arg, p);
+                    store_inst.setAlignment(param_ty.abiAlignment(target));
+                    break :p p;
+                };
+
+                var field_types_buf: [8]*llvm.Type = undefined;
+                const field_types = field_types_buf[0..llvm_ints.len];
+                for (llvm_ints, 0..) |int_bits, i| {
+                    field_types[i] = fg.dg.context.intType(int_bits);
+                }
+                const ints_llvm_ty = fg.dg.context.structType(field_types.ptr, @intCast(c_uint, field_types.len), .False);
+                const casted_ptr = fg.builder.buildBitCast(arg_ptr, ints_llvm_ty.pointerType(0), "");
+                try llvm_args.ensureUnusedCapacity(it.llvm_types_len);
+                for (0..llvm_ints.len) |i_usize| {
+                    const i = @intCast(c_uint, i_usize);
+                    const field_ptr = fg.builder.buildStructGEP(ints_llvm_ty, casted_ptr, i, "");
+                    const load_inst = fg.builder.buildLoad(field_types[i], field_ptr, "");
+                    load_inst.setAlignment(target.cpu.arch.ptrBitWidth() / 8);
+                    llvm_args.appendAssumeCapacity(load_inst);
+                }
+            },
+            .multiple_llvm_float => {
+                const arg = args[it.zig_index - 1];
+                const param_ty = fg.air.typeOf(arg);
+                const llvm_floats = it.llvm_types_buffer[0..it.llvm_types_len];
+                const llvm_arg = try fg.resolveInst(arg);
+                const is_by_ref = isByRef(param_ty);
+                const arg_ptr = if (is_by_ref) llvm_arg else p: {
+                    const p = fg.buildAlloca(llvm_arg.typeOf(), null);
+                    const store_inst = fg.builder.buildStore(llvm_arg, p);
+                    store_inst.setAlignment(param_ty.abiAlignment(target));
+                    break :p p;
+                };
+
+                var field_types_buf: [8]*llvm.Type = undefined;
+                const field_types = field_types_buf[0..llvm_floats.len];
+                for (llvm_floats, 0..) |float_bits, i| {
+                    switch (float_bits) {
+                        64 => field_types[i] = fg.dg.context.doubleType(),
+                        80 => field_types[i] = fg.dg.context.x86FP80Type(),
+                        else => {},
+                    }
+                }
+                const floats_llvm_ty = fg.dg.context.structType(field_types.ptr, @intCast(c_uint, field_types.len), .False);
+                const casted_ptr = fg.builder.buildBitCast(arg_ptr, floats_llvm_ty.pointerType(0), "");
+                try llvm_args.ensureUnusedCapacity(it.llvm_types_len);
+                for (0..llvm_floats.len) |i_usize| {
+                    const i = @intCast(c_uint, i_usize);
+                    const field_ptr = fg.builder.buildStructGEP(floats_llvm_ty, casted_ptr, i, "");
+                    const load_inst = fg.builder.buildLoad(field_types[i], field_ptr, "");
+                    load_inst.setAlignment(target.cpu.arch.ptrBitWidth() / 8);
+                    llvm_args.appendAssumeCapacity(load_inst);
+                }
+            },
+            .as_u16 => {
+                const arg = args[it.zig_index - 1];
+                const llvm_arg = try fg.resolveInst(arg);
+                const casted = fg.builder.buildBitCast(llvm_arg, fg.dg.context.intType(16), "");
+                try llvm_args.append(casted);
+            },
+            .float_array => |count| {
+                const arg = args[it.zig_index - 1];
+                const arg_ty = fg.air.typeOf(arg);
+                var llvm_arg = try fg.resolveInst(arg);
+                if (!isByRef(arg_ty)) {
+                    const p = fg.buildAlloca(llvm_arg.typeOf(), null);
+                    const store_inst = fg.builder.buildStore(llvm_arg, p);
+                    store_inst.setAlignment(arg_ty.abiAlignment(target));
+                    llvm_arg = store_inst;
+                }
+
+                const float_ty = try fg.dg.lowerType(aarch64_c_abi.getFloatArrayType(arg_ty).?);
+                const array_llvm_ty = float_ty.arrayType(count);
+
+                const casted = fg.builder.buildBitCast(llvm_arg, array_llvm_ty.pointerType(0), "");
+                const alignment = arg_ty.abiAlignment(target);
+                const load_inst = fg.builder.buildLoad(array_llvm_ty, casted, "");
+                load_inst.setAlignment(alignment);
+                try llvm_args.append(load_inst);
+            },
+            .i32_array, .i64_array => |arr_len| {
+                const elem_size: u8 = if (lowering == .i32_array) 32 else 64;
+                const arg = args[it.zig_index - 1];
+                const arg_ty = fg.air.typeOf(arg);
+                var llvm_arg = try fg.resolveInst(arg);
+                if (!isByRef(arg_ty)) {
+                    const p = fg.buildAlloca(llvm_arg.typeOf(), null);
+                    const store_inst = fg.builder.buildStore(llvm_arg, p);
+                    store_inst.setAlignment(arg_ty.abiAlignment(target));
+                    llvm_arg = store_inst;
+                }
+
+                const array_llvm_ty = fg.dg.context.intType(elem_size).arrayType(arr_len);
+                const casted = fg.builder.buildBitCast(llvm_arg, array_llvm_ty.pointerType(0), "");
+                const alignment = arg_ty.abiAlignment(target);
+                const load_inst = fg.builder.buildLoad(array_llvm_ty, casted, "");
+                load_inst.setAlignment(alignment);
+                try llvm_args.append(load_inst);
+            },
+        };
+    }
+
+    fn genFrameSize(fg: *FuncGen, llvm_fn: *llvm.Value) *llvm.Value {
+        const target = fg.getTarget();
+        const llvm_usize = fg.dg.context.intType(target.cpu.arch.ptrBitWidth());
+        const ptr_llvm_usize = llvm_usize.pointerType(0);
+        const casted_fn_val = fg.builder.buildBitCast(llvm_fn, ptr_llvm_usize, "");
+        const indices: [1]*llvm.Value = .{
+            fg.dg.context.intType(32).constInt(@bitCast(c_ulonglong, @as(c_longlong, -1)), .True),
+        };
+        const prefix_ptr = fg.builder.buildInBoundsGEP(llvm_usize, casted_fn_val, &indices, indices.len, "");
+        const load_inst = fg.builder.buildLoad(llvm_usize, prefix_ptr, "");
+
+        // Some architectures (e.g SPARCv9) has different alignment
+        // requirements between a function/usize pointer and also require all
+        // loads to be aligned. On those architectures, not explicitly setting
+        // the alignment will lead into @frameSize generating usize-aligned
+        // load instruction that could crash if the function pointer happens to
+        // be not usize-aligned.
+        load_inst.setAlignment(1);
+        return load_inst;
     }
 
     fn airRet(self: *FuncGen, inst: Air.Inst.Index) !?*llvm.Value {
@@ -11360,4 +11506,30 @@ fn constraintAllowsRegister(constraint: []const u8) bool {
             else => return true,
         }
     } else return false;
+}
+
+/// Each field is the index in the LLVM struct. The doc comments describe what
+/// the corresponding field of the LLVM struct does; not the field of the
+/// AsyncFrameLayout struct.
+const AsyncFrameLayout = struct {
+    /// Points to the return value inside the frame.
+    ret_val: u16,
+    /// This field of the frame points to the owner function so that a resume
+    /// on the frame pointer knows which function to call.
+    fn_ptr: u16,
+    /// This field tells which suspension point to resume from next time the function is called.
+    resume_index: u16,
+    /// This field tracks which frame is the one awaiting the frame for the purposes of resuming
+    /// on return.
+    /// A value of zero means the async function has been started, and there is no awaiter yet.
+    awaiter: u16,
+};
+
+fn asyncFrameLayout() AsyncFrameLayout {
+    return .{
+        .fn_ptr = 0,
+        .resume_index = 1,
+        .awaiter = 2,
+        .ret_val = 3,
+    };
 }
