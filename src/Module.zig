@@ -5774,6 +5774,9 @@ pub fn analyzeFnBody(mod: *Module, func: *Fn, arena: Allocator) SemaError!Air {
     sema.air_extra.items[@enumToInt(Air.ExtraIndex.main_block)] = main_block_index;
 
     func.state = .success;
+    if (func.async_status == .unknown) {
+        func.async_status = .not_async;
+    }
     log.debug("set {s} to success", .{decl.name});
 
     // Finally we must resolve the return type and parameter types so that backends

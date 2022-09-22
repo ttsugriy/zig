@@ -1351,6 +1351,9 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .call_async        => try self.airCall(inst, .async_kw),
             .call_async_alloc  => try self.airCall(inst, .async_kw),
 
+            .suspend_begin => try airSuspendBegin(self, inst),
+            .suspend_end   => try airSuspendEnd  (self, inst),
+
             .atomic_store_unordered => try self.airAtomicStore(inst, .Unordered),
             .atomic_store_monotonic => try self.airAtomicStore(inst, .Monotonic),
             .atomic_store_release   => try self.airAtomicStore(inst, .Release),
@@ -5873,6 +5876,16 @@ fn airFence(self: *Self, inst: Air.Inst.Index) !void {
         .SeqCst => try self.asmOpOnly(.mfence),
     }
     return self.finishAirBookkeeping();
+}
+
+fn airSuspendBegin(self: *Self, inst: Air.Inst.Index) !void {
+    _ = inst;
+    return self.fail("TODO implement suspend_begin for x86_64", .{});
+}
+
+fn airSuspendEnd(self: *Self, inst: Air.Inst.Index) !void {
+    _ = inst;
+    return self.fail("TODO implement suspend_end for x86_64", .{});
 }
 
 fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier) !void {

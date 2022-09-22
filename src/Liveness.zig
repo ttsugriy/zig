@@ -348,7 +348,10 @@ pub fn categorizeOperand(
         .work_group_id,
         => return .none,
 
-        .fence => return .write,
+        .suspend_begin,
+        .suspend_end,
+        .fence,
+        => return .write,
 
         .not,
         .bitcast,

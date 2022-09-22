@@ -1889,6 +1889,9 @@ fn genInst(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .call_async => func.airCall(inst, .async_kw),
         .call_async_alloc => func.airCall(inst, .async_kw),
 
+        .suspend_begin => func.airSuspendBegin(inst),
+        .suspend_end => func.airSuspendEnd(inst),
+
         .is_err => func.airIsErr(inst, .i32_ne),
         .is_non_err => func.airIsErr(inst, .i32_eq),
 
@@ -2129,6 +2132,16 @@ fn airRetLoad(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     try func.restoreStackPointer();
     try func.addTag(.@"return");
     return func.finishAir(inst, .none, &.{un_op});
+}
+
+fn airSuspendBegin(func: *CodeGen, inst: Air.Inst.Index) InnerError!WValue {
+    _ = inst;
+    return func.fail("TODO implement suspend_begin for wasm", .{});
+}
+
+fn airSuspendEnd(func: *CodeGen, inst: Air.Inst.Index) InnerError!WValue {
+    _ = inst;
+    return func.fail("TODO implement suspend_end for wasm", .{});
 }
 
 fn airCall(func: *CodeGen, inst: Air.Inst.Index, modifier: std.builtin.CallModifier) InnerError!WValue {
