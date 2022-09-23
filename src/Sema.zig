@@ -9120,7 +9120,8 @@ fn funcCommon(
         return sema.addType(fn_ty);
     }
 
-    const is_inline = fn_ty.fnCallingConvention() == .Inline;
+    const init_cc = fn_ty.fnCallingConvention();
+    const is_inline = init_cc == .Inline;
     const anal_state: Module.Fn.Analysis = if (is_inline) .inline_only else .queued;
 
     const comptime_args: ?[*]TypedValue = if (sema.comptime_args_fn_inst == func_inst) blk: {
@@ -9132,7 +9133,7 @@ fn funcCommon(
     const fn_payload = try sema.arena.create(Value.Payload.Function);
     new_func.* = .{
         .state = anal_state,
-        .async_status = .unknown,
+        .async_status = initAsyncSatus(init_cc),
         .zir_body_inst = func_inst,
         .owner_decl = sema.owner_decl_index,
         .generic_owner_decl = generic_owner_decl,
@@ -9154,6 +9155,14 @@ fn funcCommon(
         .data = new_func,
     };
     return sema.addConstant(fn_ty, Value.initPayload(&fn_payload.base));
+}
+
+fn initAsyncSatus(cc: std.builtin.CallingConvention) Module.Fn.AsyncStatus {
+    return switch (cc) {
+        .Unspecified => .unknown,
+        .Async => .yes_async,
+        else => .not_async,
+    };
 }
 
 fn analyzeParameter(
@@ -28759,6 +28768,20 @@ fn ensureFuncBodyAnalyzed(sema: *Sema, func: *Module.Fn) CompileError!void {
         }
         return err;
     };
+}
+
+pub fn getFuncAsyncStatus(sema: *Sema, func: *Module.Fn) CompileError!Module.Fn.AsyncStatus {
+    switch (func.async_status) {
+        .yes_async => return .yes_async,
+        .not_async => return .not_async,
+        .unknown => {
+            try ensureFuncBodyAnalyzed(sema, func);
+            switch (func.async_status) {
+                .yes_async => return .yes_async,
+                .not_async, .unknown => return .not_async,
+            }
+        },
+    }
 }
 
 fn refValue(sema: *Sema, block: *Block, ty: Type, val: Value) !Value {

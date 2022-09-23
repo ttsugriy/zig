@@ -4912,6 +4912,14 @@ pub const Type = extern union {
         };
     }
 
+    pub fn fnInfoOverrideAsync(ty: Type, is_async: bool) Payload.Function.Data {
+        var info = fnInfo(ty);
+        if (is_async) {
+            info.cc = .Async;
+        }
+        return info;
+    }
+
     pub fn fnInfo(ty: Type) Payload.Function.Data {
         return switch (ty.tag()) {
             .fn_noreturn_no_args => .{

@@ -978,7 +978,11 @@ pub const Object = struct {
         defer args.deinit();
 
         {
-            var llvm_arg_i = @as(c_uint, @boolToInt(ret_ptr != null)) + @boolToInt(err_return_tracing);
+            var llvm_arg_i =
+                @as(c_uint, @boolToInt(ret_ptr != null)) +
+                @boolToInt(err_return_tracing) +
+                @boolToInt(func.isAsync());
+
             var it = iterateParamTypes(&dg, fn_info);
             while (it.next()) |lowering| switch (lowering) {
                 .no_bits => continue,
@@ -1234,29 +1238,27 @@ pub const Object = struct {
         };
         defer fg.deinit();
 
-        if (func.isAsync()) {
-            var frame_ty_payload: Type.Payload.AsyncFrame = .{
-                .base = .{ .tag = .async_frame },
-                .data = func,
-            };
-            const frame_ty = Type.initPayload(&frame_ty_payload.base);
-            const frame_size = frame_ty.abiSize(target);
-            const llvm_usize = dg.context.intType(target.cpu.arch.ptrBitWidth());
-            const size_val = llvm_usize.constInt(frame_size, .False);
-            llvm_func.functionSetPrefixData(size_val);
+        const llvm_usize = dg.context.intType(target.cpu.arch.ptrBitWidth());
 
-            const async_preamble_bb = dg.context.appendBasicBlock(llvm_func, "AsyncSwitch");
+        if (func.isAsync()) {
             const bad_resume_bb = dg.context.appendBasicBlock(llvm_func, "BadResume");
             builder.positionBuilderAtEnd(bad_resume_bb);
             _ = builder.buildUnreachable(); // TODO make this a safety panic
 
-            builder.positionBuilderAtEnd(async_preamble_bb);
+            builder.positionBuilderAtEnd(entry_block);
             const l = asyncFrameLayout();
-            const frame_llvm_ty = try dg.lowerType(frame_ty);
+            const frame_llvm_ty = try dg.lowerAsyncFrameHeader(fn_info.return_type);
             const frame_ptr = llvm_func.getParam(0);
             fg.resume_index_ptr = builder.buildStructGEP(frame_llvm_ty, frame_ptr, l.resume_index, "");
             const resume_index = builder.buildLoad(llvm_usize, fg.resume_index_ptr, "");
             fg.async_switch = builder.buildSwitch(resume_index, bad_resume_bb, 4);
+
+            const init_bb = dg.context.appendBasicBlock(llvm_func, "Init");
+            const new_block_index = fg.resume_block_index;
+            fg.resume_block_index += 1;
+            const new_block_index_llvm_val = llvm_usize.constInt(new_block_index, .False);
+            fg.async_switch.addCase(new_block_index_llvm_val, init_bb);
+            builder.positionBuilderAtEnd(init_bb);
         }
 
         fg.genBody(air.getMainBody()) catch |err| switch (err) {
@@ -1268,6 +1270,12 @@ pub const Object = struct {
             },
             else => |e| return e,
         };
+
+        if (func.isAsync()) {
+            const frame_size = 3 * (target.cpu.arch.ptrBitWidth() / 8);
+            const size_val = llvm_usize.constInt(frame_size, .False);
+            llvm_func.functionSetPrefixData(size_val);
+        }
 
         try o.updateDeclExports(module, decl_index, module.getDeclExports(decl_index));
     }
@@ -2617,16 +2625,16 @@ pub const DeclGen = struct {
     /// completed, so if any attributes rely on that, they must be done in updateFunc, not here.
     fn resolveLlvmFunction(dg: *DeclGen, decl_index: Module.Decl.Index) !*llvm.Value {
         const decl = dg.module.declPtr(decl_index);
-        const zig_fn_type = decl.ty;
         const gop = try dg.object.decl_map.getOrPut(dg.gpa, decl_index);
         if (gop.found_existing) return gop.value_ptr.*;
 
         assert(decl.has_tv);
-        const fn_info = zig_fn_type.fnInfo();
+        const func = decl.getFunction().?;
+        const zig_fn_type = decl.ty;
+        const fn_info = zig_fn_type.fnInfoOverrideAsync(func.isAsync());
         const target = dg.module.getTarget();
         const sret = firstParamSRet(fn_info, target);
-
-        const fn_type = try dg.lowerType(zig_fn_type);
+        const fn_type = try dg.lowerTypeFn(fn_info);
 
         const fqn = try decl.getFullyQualifiedName(dg.module);
         defer dg.gpa.free(fqn);
@@ -2651,31 +2659,32 @@ pub const DeclGen = struct {
             }
         }
 
+        var llvm_param_i: u32 = 0;
+
         if (sret) {
-            dg.addArgAttr(llvm_fn, 0, "nonnull"); // Sret pointers must not be address 0
-            dg.addArgAttr(llvm_fn, 0, "noalias");
+            dg.addArgAttr(llvm_fn, llvm_param_i, "nonnull"); // Sret pointers must not be address 0
+            dg.addArgAttr(llvm_fn, llvm_param_i, "noalias");
 
             const raw_llvm_ret_ty = try dg.lowerType(fn_info.return_type);
             llvm_fn.addSretAttr(raw_llvm_ret_ty);
+
+            llvm_param_i += 1;
         }
 
         const err_return_tracing = fn_info.return_type.isError() and
             dg.module.comp.bin_file.options.error_return_tracing;
 
         if (err_return_tracing) {
-            dg.addArgAttr(llvm_fn, @boolToInt(sret), "nonnull");
+            dg.addArgAttr(llvm_fn, llvm_param_i, "nonnull");
+            llvm_param_i += 1;
         }
 
         switch (fn_info.cc) {
-            .Unspecified, .Inline => {
+            .Unspecified, .Inline, .Async => {
                 llvm_fn.setFunctionCallConv(.Fast);
             },
             .Naked => {
                 dg.addFnAttr(llvm_fn, "naked");
-            },
-            .Async => {
-                llvm_fn.setFunctionCallConv(.Fast);
-                @panic("TODO: LLVM backend lower async function");
             },
             else => {
                 llvm_fn.setFunctionCallConv(toLlvmCallConv(fn_info.cc, target));
@@ -2697,8 +2706,7 @@ pub const DeclGen = struct {
         // because functions with bodies are handled in `updateFunc`.
         if (is_extern) {
             var it = iterateParamTypes(dg, fn_info);
-            it.llvm_index += @boolToInt(sret);
-            it.llvm_index += @boolToInt(err_return_tracing);
+            it.llvm_index += llvm_param_i;
             while (it.next()) |lowering| switch (lowering) {
                 .byval => {
                     const param_index = it.zig_index - 1;
@@ -3188,7 +3196,7 @@ pub const DeclGen = struct {
                 llvm_union_ty.structSetBody(&llvm_fields, llvm_fields_len, .False);
                 return llvm_union_ty;
             },
-            .Fn => return lowerTypeFn(dg, t),
+            .Fn => return lowerTypeFn(dg, t.fnInfo()),
             .ComptimeInt => unreachable,
             .ComptimeFloat => unreachable,
             .Type => unreachable,
@@ -3234,6 +3242,9 @@ pub const DeclGen = struct {
         fields[l.fn_ptr] = opaque_ptr_ty;
         fields[l.resume_index] = try dg.lowerType(Type.usize);
         fields[l.awaiter] = opaque_ptr_ty;
+        if (!ret_ty.hasRuntimeBitsIgnoreComptime()) {
+            return dg.context.structType(&fields, 3, .False);
+        }
         fields[l.ret_val] = try dg.lowerType(ret_ty);
         return dg.context.structType(&fields, fields.len, .False);
     }
@@ -3261,16 +3272,22 @@ pub const DeclGen = struct {
         return llvm_struct_ty;
     }
 
-    fn lowerTypeFn(dg: *DeclGen, fn_ty: Type) Allocator.Error!*llvm.Type {
+    fn lowerTypeFn(dg: *DeclGen, fn_info: Type.Payload.Function.Data) Allocator.Error!*llvm.Type {
         const target = dg.module.getTarget();
-        const fn_info = fn_ty.fnInfo();
         const llvm_ret_ty = try lowerFnRetTy(dg, fn_info);
 
         var llvm_params = std.ArrayList(*llvm.Type).init(dg.gpa);
         defer llvm_params.deinit();
 
+        try llvm_params.ensureUnusedCapacity(3);
+
         if (firstParamSRet(fn_info, target)) {
-            try llvm_params.append(dg.context.pointerType(0));
+            llvm_params.appendAssumeCapacity(dg.context.pointerType(0));
+        }
+
+        if (fn_info.cc == .Async) {
+            // frame_ptr
+            llvm_params.appendAssumeCapacity(dg.context.pointerType(0));
         }
 
         if (fn_info.return_type.isError() and
@@ -3281,7 +3298,7 @@ pub const DeclGen = struct {
                 .data = dg.object.getStackTraceType(),
             };
             const ptr_ty = Type.initPayload(&ptr_ty_payload.base);
-            try llvm_params.append(try dg.lowerType(ptr_ty));
+            llvm_params.appendAssumeCapacity(try dg.lowerType(ptr_ty));
         }
 
         var it = iterateParamTypes(dg, fn_info);
