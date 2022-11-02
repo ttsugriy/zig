@@ -336,8 +336,6 @@ const Writer = struct {
             .div_trunc,
             .mod,
             .rem,
-            .bit_offset_of,
-            .offset_of,
             .splat,
             .reduce,
             .bitcast,
@@ -530,6 +528,8 @@ const Writer = struct {
             .prefetch,
             .addrspace_cast,
             .c_va_arg,
+            .bit_offset_of,
+            .offset_of,
             => {
                 const inst_data = self.code.extraData(Zir.Inst.BinNode, extended.operand).data;
                 const src = LazySrcLoc.nodeOffset(inst_data.node);
@@ -1163,7 +1163,7 @@ const Writer = struct {
         const args_len = extra.data.flags.args_len;
         const body = self.code.extra[extra.end..];
         const callee = extra.data.callee;
-        const modifier = @intToEnum(std.builtin.CallOptions.Modifier, extra.data.flags.packed_modifier);
+        const modifier = @intToEnum(std.builtin.CallModifier, extra.data.flags.packed_modifier);
 
         if (extra.data.flags.ensure_result_used) {
             try stream.writeAll("nodiscard ");

@@ -2627,8 +2627,6 @@ fn addEnsureResult(gz: *GenZir, maybe_unused_result: Zir.Inst.Ref, statement: As
             .rem,
             .shl_exact,
             .shr_exact,
-            .bit_offset_of,
-            .offset_of,
             .splat,
             .reduce,
             .shuffle,
@@ -8795,11 +8793,12 @@ fn offsetOf(
     node: Ast.Node.Index,
     lhs_node: Ast.Node.Index,
     rhs_node: Ast.Node.Index,
-    tag: Zir.Inst.Tag,
+    tag: Zir.Inst.Extended,
 ) InnerError!Zir.Inst.Ref {
     const type_inst = try typeExpr(gz, scope, lhs_node);
     const field_name = try comptimeExpr(gz, scope, .{ .rl = .{ .ty = .const_slice_u8_type } }, rhs_node);
-    const result = try gz.addPlNode(tag, node, Zir.Inst.Bin{
+    const result = try gz.addExtendedPayload(tag, Zir.Inst.BinNode{
+        .node = gz.nodeIndexToRelative(node),
         .lhs = type_inst,
         .rhs = field_name,
     });
@@ -8920,7 +8919,7 @@ fn callExprInner(
     scope: *Scope,
     node: Ast.Node.Index,
     call: Ast.full.Call,
-    modifier: std.builtin.CallOptions.Modifier,
+    modifier: std.builtin.CallModifier,
     propagate_error_trace: bool,
     comptime Payload: type,
 ) InnerError!Zir.Inst.Ref {

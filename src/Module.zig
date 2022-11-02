@@ -2357,8 +2357,8 @@ pub const SrcLoc = struct {
 
     pub fn span(src_loc: SrcLoc, gpa: Allocator) !Span {
         switch (src_loc.lazy) {
-            .unneeded => |trace| {
-                trace.dump();
+            .unneeded => |t| {
+                t.dump();
                 unreachable;
             },
             .entire_file => return Span{ .start = 0, .end = 1, .main = 0 },
@@ -5784,7 +5784,7 @@ pub fn analyzeFnBody(mod: *Module, func: *Fn, arena: Allocator) SemaError!Air {
         const air = sema.getTmpAir();
         const air_tags = air.instructions.items(.tag);
         const air_datas = air.instructions.items(.data);
-        for (air_tags) |air_tag, inst| {
+        for (air_tags, 0..) |air_tag, inst| {
             var is_suspend_point = false;
             const callee = switch (air_tag) {
                 .call, .call_always_tail, .call_never_tail, .call_never_inline => c: {
