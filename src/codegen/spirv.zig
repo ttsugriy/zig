@@ -842,7 +842,8 @@ pub const DeclGen = struct {
                     const error_size = Type.anyerror.abiAlignment(mod);
                     const ty_size = ty.abiSize(mod);
                     const padding = ty_size - payload_size - error_size;
-                    const payload_val = if (val.castTag(.eu_payload)) |pl| pl.data else Value.initTag(.undef);
+
+                    const payload_val = if (val.castTag(.eu_payload)) |pl| pl.data else Value.undef;
 
                     if (eu_layout.error_first) {
                         try self.lower(Type.anyerror, error_val);
@@ -1273,7 +1274,7 @@ pub const DeclGen = struct {
                     var member_index: u32 = 0;
                     for (tuple.types, 0..) |field_ty, i| {
                         const field_val = tuple.values[i];
-                        if (field_val.tag() != .unreachable_value or !field_ty.hasRuntimeBitsIgnoreComptime(mod)) continue;
+                        if (field_val.ip_index != .unreachable_value or !field_ty.hasRuntimeBitsIgnoreComptime(mod)) continue;
                         members[member_index] = .{
                             .ty = try self.resolveType(field_ty, .indirect),
                         };
@@ -1569,7 +1570,7 @@ pub const DeclGen = struct {
             else
                 decl.val;
 
-            if (init_val.tag() == .unreachable_value) {
+            if (init_val.ip_index == .unreachable_value) {
                 return self.todo("importing extern variables", .{});
             }
 

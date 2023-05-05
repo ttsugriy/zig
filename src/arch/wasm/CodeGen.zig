@@ -3006,13 +3006,17 @@ fn lowerConstant(func: *CodeGen, arg_val: Value, ty: Type) InnerError!WValue {
             64 => return WValue{ .float64 = val.toFloat(f64) },
             else => unreachable,
         },
-        .Pointer => switch (val.tag()) {
-            .field_ptr, .elem_ptr, .opt_payload_ptr => {
-                return func.lowerParentPtr(val, ty.childType(mod));
+        .Pointer => switch (val.ip_index) {
+            .null_value => return WValue{ .imm32 = 0 },
+            .none => switch (val.tag()) {
+                .field_ptr, .elem_ptr, .opt_payload_ptr => {
+                    return func.lowerParentPtr(val, ty.childType(mod));
+                },
+                .int_u64, .one => return WValue{ .imm32 = @intCast(u32, val.toUnsignedInt(mod)) },
+                .zero => return WValue{ .imm32 = 0 },
+                else => return func.fail("Wasm TODO: lowerConstant for other const pointer tag {}", .{val.tag()}),
             },
-            .int_u64, .one => return WValue{ .imm32 = @intCast(u32, val.toUnsignedInt(mod)) },
-            .zero, .null_value => return WValue{ .imm32 = 0 },
-            else => return func.fail("Wasm TODO: lowerConstant for other const pointer tag {}", .{val.tag()}),
+            else => unreachable,
         },
         .Enum => {
             if (val.castTag(.enum_field_index)) |field_index| {
