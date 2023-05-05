@@ -658,20 +658,20 @@ pub const DeclGen = struct {
                 .Array => switch (val.tag()) {
                     .aggregate => {
                         const elem_vals = val.castTag(.aggregate).?.data;
-                        const elem_ty = ty.elemType();
-                        const len = @intCast(u32, ty.arrayLenIncludingSentinel()); // TODO: limit spir-v to 32 bit arrays in a more elegant way.
+                        const elem_ty = ty.childType(mod);
+                        const len = @intCast(u32, ty.arrayLenIncludingSentinel(mod)); // TODO: limit spir-v to 32 bit arrays in a more elegant way.
                         for (elem_vals[0..len]) |elem_val| {
                             try self.lower(elem_ty, elem_val);
                         }
                     },
                     .repeated => {
                         const elem_val = val.castTag(.repeated).?.data;
-                        const elem_ty = ty.elemType();
-                        const len = @intCast(u32, ty.arrayLen());
+                        const elem_ty = ty.childType(mod);
+                        const len = @intCast(u32, ty.arrayLen(mod));
                         for (0..len) |_| {
                             try self.lower(elem_ty, elem_val);
                         }
-                        if (ty.sentinel()) |sentinel| {
+                        if (ty.sentinel(mod)) |sentinel| {
                             try self.lower(elem_ty, sentinel);
                         }
                     },
@@ -679,7 +679,7 @@ pub const DeclGen = struct {
                         const str_lit = val.castTag(.str_lit).?.data;
                         const bytes = dg.module.string_literal_bytes.items[str_lit.index..][0..str_lit.len];
                         try self.addBytes(bytes);
-                        if (ty.sentinel()) |sentinel| {
+                        if (ty.sentinel(mod)) |sentinel| {
                             try self.addByte(@intCast(u8, sentinel.toUnsignedInt(mod)));
                         }
                     },
@@ -735,8 +735,7 @@ pub const DeclGen = struct {
                     }
                 },
                 .Optional => {
-                    var opt_buf: Type.Payload.ElemType = undefined;
-                    const payload_ty = ty.optionalChild(&opt_buf);
+                    const payload_ty = ty.optionalChild(mod);
                     const has_payload = !val.isNull(mod);
                     const abi_size = ty.abiSize(mod);
 
@@ -1202,10 +1201,10 @@ pub const DeclGen = struct {
                 return try self.spv.resolveType(SpvType.float(bits));
             },
             .Array => {
-                const elem_ty = ty.childType();
+                const elem_ty = ty.childType(mod);
                 const elem_ty_ref = try self.resolveType(elem_ty, .indirect);
-                const total_len = std.math.cast(u32, ty.arrayLenIncludingSentinel()) orelse {
-                    return self.fail("array type of {} elements is too large", .{ty.arrayLenIncludingSentinel()});
+                const total_len = std.math.cast(u32, ty.arrayLenIncludingSentinel(mod)) orelse {
+                    return self.fail("array type of {} elements is too large", .{ty.arrayLenIncludingSentinel(mod)});
                 };
                 return try self.spv.arrayType(total_len, elem_ty_ref);
             },
@@ -1235,7 +1234,7 @@ pub const DeclGen = struct {
                 },
             },
             .Pointer => {
-                const ptr_info = ty.ptrInfo().data;
+                const ptr_info = ty.ptrInfo(mod);
 
                 const storage_class = spvStorageClass(ptr_info.@"addrspace");
                 const child_ty_ref = try self.resolveType(ptr_info.pointee_type, .indirect);
@@ -1262,8 +1261,8 @@ pub const DeclGen = struct {
 
                 const payload = try self.spv.arena.create(SpvType.Payload.Vector);
                 payload.* = .{
-                    .component_type = try self.resolveType(ty.elemType(), repr),
-                    .component_count = @intCast(u32, ty.vectorLen()),
+                    .component_type = try self.resolveType(ty.childType(mod), repr),
+                    .component_count = @intCast(u32, ty.vectorLen(mod)),
                 };
                 return try self.spv.resolveType(SpvType.initPayload(&payload.base));
             },
@@ -1316,8 +1315,7 @@ pub const DeclGen = struct {
                 return try self.spv.resolveType(SpvType.initPayload(&payload.base));
             },
             .Optional => {
-                var buf: Type.Payload.ElemType = undefined;
-                const payload_ty = ty.optionalChild(&buf);
+                const payload_ty = ty.optionalChild(mod);
                 if (!payload_ty.hasRuntimeBitsIgnoreComptime(mod)) {
                     // Just use a bool.
                     // Note: Always generate the bool with indirect format, to save on some sanity
@@ -1655,7 +1653,8 @@ pub const DeclGen = struct {
     }
 
     fn load(self: *DeclGen, ptr_ty: Type, ptr_id: IdRef) !IdRef {
-        const value_ty = ptr_ty.childType();
+        const mod = self.module;
+        const value_ty = ptr_ty.childType(mod);
         const indirect_value_ty_ref = try self.resolveType(value_ty, .indirect);
         const result_id = self.spv.allocId();
         const access = spec.MemoryAccess.Extended{
@@ -1671,7 +1670,8 @@ pub const DeclGen = struct {
     }
 
     fn store(self: *DeclGen, ptr_ty: Type, ptr_id: IdRef, value_id: IdRef) !void {
-        const value_ty = ptr_ty.childType();
+        const mod = self.module;
+        const value_ty = ptr_ty.childType(mod);
         const indirect_value_id = try self.convertToIndirect(value_ty, value_id);
         const access = spec.MemoryAccess.Extended{
             .Volatile = ptr_ty.isVolatilePtr(),
@@ -2018,7 +2018,7 @@ pub const DeclGen = struct {
         const b = try self.resolve(extra.b);
         const mask = self.air.values[extra.mask];
         const mask_len = extra.mask_len;
-        const a_len = self.typeOf(extra.a).vectorLen();
+        const a_len = self.typeOf(extra.a).vectorLen(mod);
 
         const result_id = self.spv.allocId();
         const result_type_id = try self.resolveTypeId(ty);
@@ -2308,7 +2308,7 @@ pub const DeclGen = struct {
         const bin_op = self.air.extraData(Air.Bin, ty_pl.payload).data;
         const ptr_ty = self.typeOf(bin_op.lhs);
         const result_ty = self.typeOfIndex(inst);
-        const elem_ty = ptr_ty.childType();
+        const elem_ty = ptr_ty.childType(mod);
         // TODO: Make this return a null ptr or something
         if (!elem_ty.hasRuntimeBitsIgnoreComptime(mod)) return null;
 
@@ -2363,7 +2363,7 @@ pub const DeclGen = struct {
         field_index: u32,
     ) !?IdRef {
         const mod = self.module;
-        const object_ty = object_ptr_ty.childType();
+        const object_ty = object_ptr_ty.childType(mod);
         switch (object_ty.zigTypeTag(mod)) {
             .Struct => switch (object_ty.containerLayout()) {
                 .Packed => unreachable, // TODO
@@ -2651,7 +2651,7 @@ pub const DeclGen = struct {
         const mod = self.module;
         const un_op = self.air.instructions.items(.data)[inst].un_op;
         const ptr_ty = self.typeOf(un_op);
-        const ret_ty = ptr_ty.childType();
+        const ret_ty = ptr_ty.childType(mod);
 
         if (!ret_ty.hasRuntimeBitsIgnoreComptime(mod)) {
             try self.func.body.emit(self.spv.gpa, .OpReturn, {});
@@ -2794,8 +2794,7 @@ pub const DeclGen = struct {
         const operand_id = try self.resolve(un_op);
         const optional_ty = self.typeOf(un_op);
 
-        var buf: Type.Payload.ElemType = undefined;
-        const payload_ty = optional_ty.optionalChild(&buf);
+        const payload_ty = optional_ty.optionalChild(mod);
 
         const bool_ty_ref = try self.resolveType(Type.bool, .direct);
 

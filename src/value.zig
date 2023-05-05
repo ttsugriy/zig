@@ -33,14 +33,6 @@ pub const Value = struct {
     // Keep in sync with tools/stage2_pretty_printers_common.py
     pub const Tag = enum(usize) {
         // The first section of this enum are tags that require no payload.
-        manyptr_u8_type,
-        manyptr_const_u8_type,
-        manyptr_const_u8_sentinel_0_type,
-        single_const_pointer_to_comptime_int_type,
-        const_slice_u8_type,
-        const_slice_u8_sentinel_0_type,
-        anyerror_void_error_union_type,
-
         undef,
         zero,
         one,
@@ -140,11 +132,6 @@ pub const Value = struct {
 
         pub fn Type(comptime t: Tag) type {
             return switch (t) {
-                .single_const_pointer_to_comptime_int_type,
-                .const_slice_u8_type,
-                .const_slice_u8_sentinel_0_type,
-                .anyerror_void_error_union_type,
-
                 .undef,
                 .zero,
                 .one,
@@ -153,9 +140,6 @@ pub const Value = struct {
                 .empty_struct_value,
                 .empty_array,
                 .null_value,
-                .manyptr_u8_type,
-                .manyptr_const_u8_type,
-                .manyptr_const_u8_sentinel_0_type,
                 => @compileError("Value Tag " ++ @tagName(t) ++ " has no payload"),
 
                 .int_big_positive,
@@ -280,9 +264,7 @@ pub const Value = struct {
     }
 
     pub fn castTag(self: Value, comptime t: Tag) ?*t.Type() {
-        if (self.ip_index != .none) {
-            return null;
-        }
+        assert(self.ip_index == .none);
 
         if (@enumToInt(self.legacy.tag_if_small_enough) < Tag.no_payload_count)
             return null;
@@ -305,11 +287,6 @@ pub const Value = struct {
                 .legacy = .{ .tag_if_small_enough = self.legacy.tag_if_small_enough },
             };
         } else switch (self.legacy.ptr_otherwise.tag) {
-            .single_const_pointer_to_comptime_int_type,
-            .const_slice_u8_type,
-            .const_slice_u8_sentinel_0_type,
-            .anyerror_void_error_union_type,
-
             .undef,
             .zero,
             .one,
@@ -318,9 +295,6 @@ pub const Value = struct {
             .empty_array,
             .null_value,
             .empty_struct_value,
-            .manyptr_u8_type,
-            .manyptr_const_u8_type,
-            .manyptr_const_u8_sentinel_0_type,
             => unreachable,
 
             .ty, .lazy_align, .lazy_size => {
@@ -553,14 +527,6 @@ pub const Value = struct {
         }
         var val = start_val;
         while (true) switch (val.tag()) {
-            .single_const_pointer_to_comptime_int_type => return out_stream.writeAll("*const comptime_int"),
-            .const_slice_u8_type => return out_stream.writeAll("[]const u8"),
-            .const_slice_u8_sentinel_0_type => return out_stream.writeAll("[:0]const u8"),
-            .anyerror_void_error_union_type => return out_stream.writeAll("anyerror!void"),
-            .manyptr_u8_type => return out_stream.writeAll("[*]u8"),
-            .manyptr_const_u8_type => return out_stream.writeAll("[*]const u8"),
-            .manyptr_const_u8_sentinel_0_type => return out_stream.writeAll("[*:0]const u8"),
-
             .empty_struct_value => return out_stream.writeAll("struct {}{}"),
             .aggregate => {
                 return out_stream.writeAll("(aggregate)");
@@ -674,7 +640,7 @@ pub const Value = struct {
         switch (val.tag()) {
             .bytes => {
                 const bytes = val.castTag(.bytes).?.data;
-                const adjusted_len = bytes.len - @boolToInt(ty.sentinel() != null);
+                const adjusted_len = bytes.len - @boolToInt(ty.sentinel(mod) != null);
                 const adjusted_bytes = bytes[0..adjusted_len];
                 return allocator.dupe(u8, adjusted_bytes);
             },
@@ -686,7 +652,7 @@ pub const Value = struct {
             .enum_literal => return allocator.dupe(u8, val.castTag(.enum_literal).?.data),
             .repeated => {
                 const byte = @intCast(u8, val.castTag(.repeated).?.data.toUnsignedInt(mod));
-                const result = try allocator.alloc(u8, @intCast(usize, ty.arrayLen()));
+                const result = try allocator.alloc(u8, @intCast(usize, ty.arrayLen(mod)));
                 @memset(result, byte);
                 return result;
             },
@@ -701,7 +667,7 @@ pub const Value = struct {
                 const slice = val.castTag(.slice).?.data;
                 return arrayToAllocatedBytes(slice.ptr, slice.len.toUnsignedInt(mod), allocator, mod);
             },
-            else => return arrayToAllocatedBytes(val, ty.arrayLen(), allocator, mod),
+            else => return arrayToAllocatedBytes(val, ty.arrayLen(mod), allocator, mod),
         }
     }
 
@@ -720,13 +686,6 @@ pub const Value = struct {
         if (self.ip_index != .none) return self.ip_index.toType();
         return switch (self.tag()) {
             .ty => self.castTag(.ty).?.data,
-            .single_const_pointer_to_comptime_int_type => Type.initTag(.single_const_pointer_to_comptime_int),
-            .const_slice_u8_type => Type.initTag(.const_slice_u8),
-            .const_slice_u8_sentinel_0_type => Type.initTag(.const_slice_u8_sentinel_0),
-            .anyerror_void_error_union_type => Type.initTag(.anyerror_void_error_union),
-            .manyptr_u8_type => Type.initTag(.manyptr_u8),
-            .manyptr_const_u8_type => Type.initTag(.manyptr_const_u8),
-            .manyptr_const_u8_sentinel_0_type => Type.initTag(.manyptr_const_u8_sentinel_0),
 
             else => unreachable,
         };
@@ -1096,8 +1055,8 @@ pub const Value = struct {
                 else => unreachable,
             },
             .Array => {
-                const len = ty.arrayLen();
-                const elem_ty = ty.childType();
+                const len = ty.arrayLen(mod);
+                const elem_ty = ty.childType(mod);
                 const elem_size = @intCast(usize, elem_ty.abiSize(mod));
                 var elem_i: usize = 0;
                 var elem_value_buf: ElemValueBuffer = undefined;
@@ -1150,8 +1109,7 @@ pub const Value = struct {
             },
             .Optional => {
                 if (!ty.isPtrLikeOptional(mod)) return error.IllDefinedMemoryLayout;
-                var buf: Type.Payload.ElemType = undefined;
-                const child = ty.optionalChild(&buf);
+                const child = ty.optionalChild(mod);
                 const opt_val = val.optionalValue(mod);
                 if (opt_val) |some| {
                     return some.writeToMemory(child, mod, buffer);
@@ -1220,9 +1178,9 @@ pub const Value = struct {
                 else => unreachable,
             },
             .Vector => {
-                const elem_ty = ty.childType();
+                const elem_ty = ty.childType(mod);
                 const elem_bit_size = @intCast(u16, elem_ty.bitSize(mod));
-                const len = @intCast(usize, ty.arrayLen());
+                const len = @intCast(usize, ty.arrayLen(mod));
 
                 var bits: u16 = 0;
                 var elem_i: usize = 0;
@@ -1267,8 +1225,7 @@ pub const Value = struct {
             },
             .Optional => {
                 assert(ty.isPtrLikeOptional(mod));
-                var buf: Type.Payload.ElemType = undefined;
-                const child = ty.optionalChild(&buf);
+                const child = ty.optionalChild(mod);
                 const opt_val = val.optionalValue(mod);
                 if (opt_val) |some| {
                     return some.writeToPackedMemory(child, mod, buffer, bit_offset);
@@ -1335,9 +1292,9 @@ pub const Value = struct {
                 else => unreachable,
             },
             .Array => {
-                const elem_ty = ty.childType();
+                const elem_ty = ty.childType(mod);
                 const elem_size = elem_ty.abiSize(mod);
-                const elems = try arena.alloc(Value, @intCast(usize, ty.arrayLen()));
+                const elems = try arena.alloc(Value, @intCast(usize, ty.arrayLen(mod)));
                 var offset: usize = 0;
                 for (elems) |*elem| {
                     elem.* = try readFromMemory(elem_ty, mod, buffer[offset..], arena);
@@ -1386,8 +1343,7 @@ pub const Value = struct {
             },
             .Optional => {
                 assert(ty.isPtrLikeOptional(mod));
-                var buf: Type.Payload.ElemType = undefined;
-                const child = ty.optionalChild(&buf);
+                const child = ty.optionalChild(mod);
                 return readFromMemory(child, mod, buffer, arena);
             },
             else => @panic("TODO implement readFromMemory for more types"),
@@ -1449,8 +1405,8 @@ pub const Value = struct {
                 else => unreachable,
             },
             .Vector => {
-                const elem_ty = ty.childType();
-                const elems = try arena.alloc(Value, @intCast(usize, ty.arrayLen()));
+                const elem_ty = ty.childType(mod);
+                const elems = try arena.alloc(Value, @intCast(usize, ty.arrayLen(mod)));
 
                 var bits: u16 = 0;
                 const elem_bit_size = @intCast(u16, elem_ty.bitSize(mod));
@@ -1483,8 +1439,7 @@ pub const Value = struct {
             },
             .Optional => {
                 assert(ty.isPtrLikeOptional(mod));
-                var buf: Type.Payload.ElemType = undefined;
-                const child = ty.optionalChild(&buf);
+                const child = ty.optionalChild(mod);
                 return readFromPackedMemory(child, mod, buffer, bit_offset, arena);
             },
             else => @panic("TODO implement readFromPackedMemory for more types"),
@@ -1956,7 +1911,7 @@ pub const Value = struct {
     pub fn compareAll(lhs: Value, op: std.math.CompareOperator, rhs: Value, ty: Type, mod: *Module) bool {
         if (ty.zigTypeTag(mod) == .Vector) {
             var i: usize = 0;
-            while (i < ty.vectorLen()) : (i += 1) {
+            while (i < ty.vectorLen(mod)) : (i += 1) {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
                 const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
@@ -2091,8 +2046,7 @@ pub const Value = struct {
             .opt_payload => {
                 const a_payload = a.castTag(.opt_payload).?.data;
                 const b_payload = b.castTag(.opt_payload).?.data;
-                var buffer: Type.Payload.ElemType = undefined;
-                const payload_ty = ty.optionalChild(&buffer);
+                const payload_ty = ty.optionalChild(mod);
                 return eqlAdvanced(a_payload, payload_ty, b_payload, payload_ty, mod, opt_sema);
             },
             .slice => {
@@ -2174,7 +2128,7 @@ pub const Value = struct {
                     return true;
                 }
 
-                const elem_ty = ty.childType();
+                const elem_ty = ty.childType(mod);
                 for (a_field_vals, 0..) |a_elem, i| {
                     const b_elem = b_field_vals[i];
 
@@ -2238,8 +2192,8 @@ pub const Value = struct {
                 return eqlAdvanced(a_val, int_ty, b_val, int_ty, mod, opt_sema);
             },
             .Array, .Vector => {
-                const len = ty.arrayLen();
-                const elem_ty = ty.childType();
+                const len = ty.arrayLen(mod);
+                const elem_ty = ty.childType(mod);
                 var i: usize = 0;
                 var a_buf: ElemValueBuffer = undefined;
                 var b_buf: ElemValueBuffer = undefined;
@@ -2252,11 +2206,11 @@ pub const Value = struct {
                 }
                 return true;
             },
-            .Pointer => switch (ty.ptrSize()) {
+            .Pointer => switch (ty.ptrSize(mod)) {
                 .Slice => {
-                    const a_len = switch (a_ty.ptrSize()) {
+                    const a_len = switch (a_ty.ptrSize(mod)) {
                         .Slice => a.sliceLen(mod),
-                        .One => a_ty.childType().arrayLen(),
+                        .One => a_ty.childType(mod).arrayLen(mod),
                         else => unreachable,
                     };
                     if (a_len != b.sliceLen(mod)) {
@@ -2265,7 +2219,7 @@ pub const Value = struct {
 
                     var ptr_buf: Type.SlicePtrFieldTypeBuffer = undefined;
                     const ptr_ty = ty.slicePtrFieldType(&ptr_buf);
-                    const a_ptr = switch (a_ty.ptrSize()) {
+                    const a_ptr = switch (a_ty.ptrSize(mod)) {
                         .Slice => a.slicePtr(),
                         .One => a,
                         else => unreachable,
@@ -2411,8 +2365,8 @@ pub const Value = struct {
                 else => return hashPtr(val, hasher, mod),
             },
             .Array, .Vector => {
-                const len = ty.arrayLen();
-                const elem_ty = ty.childType();
+                const len = ty.arrayLen(mod);
+                const elem_ty = ty.childType(mod);
                 var index: usize = 0;
                 var elem_value_buf: ElemValueBuffer = undefined;
                 while (index < len) : (index += 1) {
@@ -2437,8 +2391,7 @@ pub const Value = struct {
                 if (val.castTag(.opt_payload)) |payload| {
                     std.hash.autoHash(hasher, true); // non-null
                     const sub_val = payload.data;
-                    var buffer: Type.Payload.ElemType = undefined;
-                    const sub_ty = ty.optionalChild(&buffer);
+                    const sub_ty = ty.optionalChild(mod);
                     sub_val.hash(sub_ty, hasher, mod);
                 } else {
                     std.hash.autoHash(hasher, false); // null
@@ -2533,8 +2486,8 @@ pub const Value = struct {
                 else => val.hashPtr(hasher, mod),
             },
             .Array, .Vector => {
-                const len = ty.arrayLen();
-                const elem_ty = ty.childType();
+                const len = ty.arrayLen(mod);
+                const elem_ty = ty.childType(mod);
                 var index: usize = 0;
                 var elem_value_buf: ElemValueBuffer = undefined;
                 while (index < len) : (index += 1) {
@@ -2543,8 +2496,7 @@ pub const Value = struct {
                 }
             },
             .Optional => if (val.castTag(.opt_payload)) |payload| {
-                var buf: Type.Payload.ElemType = undefined;
-                const child_ty = ty.optionalChild(&buf);
+                const child_ty = ty.optionalChild(mod);
                 payload.data.hashUncoerced(child_ty, hasher, mod);
             } else std.hash.autoHash(hasher, std.builtin.TypeId.Null),
             .ErrorSet, .ErrorUnion => if (val.getError()) |err| hasher.update(err) else {
@@ -2719,7 +2671,7 @@ pub const Value = struct {
                 const decl_index = val.castTag(.decl_ref).?.data;
                 const decl = mod.declPtr(decl_index);
                 if (decl.ty.zigTypeTag(mod) == .Array) {
-                    return decl.ty.arrayLen();
+                    return decl.ty.arrayLen(mod);
                 } else {
                     return 1;
                 }
@@ -2728,7 +2680,7 @@ pub const Value = struct {
                 const decl_index = val.castTag(.decl_ref_mut).?.data.decl_index;
                 const decl = mod.declPtr(decl_index);
                 if (decl.ty.zigTypeTag(mod) == .Array) {
-                    return decl.ty.arrayLen();
+                    return decl.ty.arrayLen(mod);
                 } else {
                     return 1;
                 }
@@ -2736,7 +2688,7 @@ pub const Value = struct {
             .comptime_field_ptr => {
                 const payload = val.castTag(.comptime_field_ptr).?.data;
                 if (payload.field_ty.zigTypeTag(mod) == .Array) {
-                    return payload.field_ty.arrayLen();
+                    return payload.field_ty.arrayLen(mod);
                 } else {
                     return 1;
                 }
@@ -3136,7 +3088,7 @@ pub const Value = struct {
 
     pub fn intToFloatAdvanced(val: Value, arena: Allocator, int_ty: Type, float_ty: Type, mod: *Module, opt_sema: ?*Sema) !Value {
         if (int_ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, int_ty.vectorLen());
+            const result_data = try arena.alloc(Value, int_ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -3249,7 +3201,7 @@ pub const Value = struct {
         mod: *Module,
     ) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, ty.vectorLen());
+            const result_data = try arena.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -3297,7 +3249,7 @@ pub const Value = struct {
         mod: *Module,
     ) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, ty.vectorLen());
+            const result_data = try arena.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -3344,8 +3296,8 @@ pub const Value = struct {
         mod: *Module,
     ) !OverflowArithmeticResult {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const overflowed_data = try arena.alloc(Value, ty.vectorLen());
-            const result_data = try arena.alloc(Value, ty.vectorLen());
+            const overflowed_data = try arena.alloc(Value, ty.vectorLen(mod));
+            const result_data = try arena.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -3407,7 +3359,7 @@ pub const Value = struct {
         mod: *Module,
     ) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, ty.vectorLen());
+            const result_data = try arena.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -3451,7 +3403,7 @@ pub const Value = struct {
         mod: *Module,
     ) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, ty.vectorLen());
+            const result_data = try arena.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -3526,7 +3478,7 @@ pub const Value = struct {
     /// operands must be (vectors of) integers; handles undefined scalars.
     pub fn bitwiseNot(val: Value, ty: Type, arena: Allocator, mod: *Module) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, ty.vectorLen());
+            const result_data = try arena.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -3564,7 +3516,7 @@ pub const Value = struct {
     /// operands must be (vectors of) integers; handles undefined scalars.
     pub fn bitwiseAnd(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try allocator.alloc(Value, ty.vectorLen());
+            const result_data = try allocator.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -3600,7 +3552,7 @@ pub const Value = struct {
     /// operands must be (vectors of) integers; handles undefined scalars.
     pub fn bitwiseNand(lhs: Value, rhs: Value, ty: Type, arena: Allocator, mod: *Module) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, ty.vectorLen());
+            const result_data = try arena.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -3630,7 +3582,7 @@ pub const Value = struct {
     /// operands must be (vectors of) integers; handles undefined scalars.
     pub fn bitwiseOr(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try allocator.alloc(Value, ty.vectorLen());
+            const result_data = try allocator.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -3665,7 +3617,7 @@ pub const Value = struct {
     /// operands must be (vectors of) integers; handles undefined scalars.
     pub fn bitwiseXor(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try allocator.alloc(Value, ty.vectorLen());
+            const result_data = try allocator.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -3700,7 +3652,7 @@ pub const Value = struct {
 
     pub fn intDiv(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try allocator.alloc(Value, ty.vectorLen());
+            const result_data = try allocator.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -3740,7 +3692,7 @@ pub const Value = struct {
 
     pub fn intDivFloor(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try allocator.alloc(Value, ty.vectorLen());
+            const result_data = try allocator.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -3780,7 +3732,7 @@ pub const Value = struct {
 
     pub fn intMod(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try allocator.alloc(Value, ty.vectorLen());
+            const result_data = try allocator.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -3856,7 +3808,7 @@ pub const Value = struct {
     pub fn floatRem(lhs: Value, rhs: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -3903,7 +3855,7 @@ pub const Value = struct {
     pub fn floatMod(lhs: Value, rhs: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -3949,7 +3901,7 @@ pub const Value = struct {
 
     pub fn intMul(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try allocator.alloc(Value, ty.vectorLen());
+            const result_data = try allocator.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -3985,7 +3937,7 @@ pub const Value = struct {
 
     pub fn intTrunc(val: Value, ty: Type, allocator: Allocator, signedness: std.builtin.Signedness, bits: u16, mod: *Module) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try allocator.alloc(Value, ty.vectorLen());
+            const result_data = try allocator.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -4006,7 +3958,7 @@ pub const Value = struct {
         mod: *Module,
     ) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try allocator.alloc(Value, ty.vectorLen());
+            const result_data = try allocator.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -4037,7 +3989,7 @@ pub const Value = struct {
 
     pub fn shl(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try allocator.alloc(Value, ty.vectorLen());
+            const result_data = try allocator.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -4077,8 +4029,8 @@ pub const Value = struct {
         mod: *Module,
     ) !OverflowArithmeticResult {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const overflowed_data = try allocator.alloc(Value, ty.vectorLen());
-            const result_data = try allocator.alloc(Value, ty.vectorLen());
+            const overflowed_data = try allocator.alloc(Value, ty.vectorLen(mod));
+            const result_data = try allocator.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -4135,7 +4087,7 @@ pub const Value = struct {
         mod: *Module,
     ) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, ty.vectorLen());
+            const result_data = try arena.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -4183,7 +4135,7 @@ pub const Value = struct {
         mod: *Module,
     ) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, ty.vectorLen());
+            const result_data = try arena.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -4211,7 +4163,7 @@ pub const Value = struct {
 
     pub fn shr(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
         if (ty.zigTypeTag(mod) == .Vector) {
-            const result_data = try allocator.alloc(Value, ty.vectorLen());
+            const result_data = try allocator.alloc(Value, ty.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -4263,7 +4215,7 @@ pub const Value = struct {
     ) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -4299,7 +4251,7 @@ pub const Value = struct {
     ) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -4358,7 +4310,7 @@ pub const Value = struct {
     ) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -4417,7 +4369,7 @@ pub const Value = struct {
     ) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -4476,7 +4428,7 @@ pub const Value = struct {
     ) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var lhs_buf: Value.ElemValueBuffer = undefined;
                 var rhs_buf: Value.ElemValueBuffer = undefined;
@@ -4529,7 +4481,7 @@ pub const Value = struct {
     pub fn sqrt(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -4569,7 +4521,7 @@ pub const Value = struct {
     pub fn sin(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -4609,7 +4561,7 @@ pub const Value = struct {
     pub fn cos(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -4649,7 +4601,7 @@ pub const Value = struct {
     pub fn tan(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -4689,7 +4641,7 @@ pub const Value = struct {
     pub fn exp(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -4729,7 +4681,7 @@ pub const Value = struct {
     pub fn exp2(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -4769,7 +4721,7 @@ pub const Value = struct {
     pub fn log(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -4809,7 +4761,7 @@ pub const Value = struct {
     pub fn log2(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -4849,7 +4801,7 @@ pub const Value = struct {
     pub fn log10(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -4889,7 +4841,7 @@ pub const Value = struct {
     pub fn fabs(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -4929,7 +4881,7 @@ pub const Value = struct {
     pub fn floor(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -4969,7 +4921,7 @@ pub const Value = struct {
     pub fn ceil(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -5009,7 +4961,7 @@ pub const Value = struct {
     pub fn round(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -5049,7 +5001,7 @@ pub const Value = struct {
     pub fn trunc(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var buf: Value.ElemValueBuffer = undefined;
                 const elem_val = val.elemValueBuffer(mod, i, &buf);
@@ -5096,7 +5048,7 @@ pub const Value = struct {
     ) !Value {
         const target = mod.getTarget();
         if (float_type.zigTypeTag(mod) == .Vector) {
-            const result_data = try arena.alloc(Value, float_type.vectorLen());
+            const result_data = try arena.alloc(Value, float_type.vectorLen(mod));
             for (result_data, 0..) |*scalar, i| {
                 var mulend1_buf: Value.ElemValueBuffer = undefined;
                 const mulend1_elem = mulend1.elemValueBuffer(mod, i, &mulend1_buf);
