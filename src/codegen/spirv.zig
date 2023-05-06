@@ -702,7 +702,7 @@ pub const DeclGen = struct {
                         const slice = val.castTag(.slice).?.data;
 
                         var buf: Type.SlicePtrFieldTypeBuffer = undefined;
-                        const ptr_ty = ty.slicePtrFieldType(&buf);
+                        const ptr_ty = ty.slicePtrFieldType(&buf, mod);
 
                         try self.lower(ptr_ty, slice.ptr);
                         try self.addInt(Type.usize, slice.len);
@@ -2276,7 +2276,7 @@ pub const DeclGen = struct {
         const index = try self.resolve(bin_op.rhs);
 
         var slice_buf: Type.SlicePtrFieldTypeBuffer = undefined;
-        const ptr_ty_id = try self.resolveTypeId(slice_ty.slicePtrFieldType(&slice_buf));
+        const ptr_ty_id = try self.resolveTypeId(slice_ty.slicePtrFieldType(&slice_buf, mod));
 
         const slice_ptr = blk: {
             const result_id = self.spv.allocId();
