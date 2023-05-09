@@ -3224,7 +3224,7 @@ fn zirOpaqueDecl(
     const new_namespace = mod.namespacePtr(new_namespace_index);
     errdefer mod.destroyNamespace(new_namespace_index);
 
-    const opaque_ty = try mod.intern_pool.get(gpa, .{ .opaque_type = .{
+    const opaque_ty = try mod.intern(.{ .opaque_type = .{
         .decl = new_decl_index,
         .namespace = new_namespace_index,
     } });
@@ -5193,23 +5193,21 @@ fn zirIntBig(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
 
 fn zirFloat(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
     _ = block;
-    const arena = sema.arena;
     const number = sema.code.instructions.items(.data)[inst].float;
     return sema.addConstant(
         Type.comptime_float,
-        try Value.Tag.float_64.create(arena, number),
+        try sema.mod.floatValue(Type.comptime_float, number),
     );
 }
 
 fn zirFloat128(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
     _ = block;
-    const arena = sema.arena;
     const inst_data = sema.code.instructions.items(.data)[inst].pl_node;
     const extra = sema.code.extraData(Zir.Inst.Float128, inst_data.payload_index).data;
     const number = extra.get();
     return sema.addConstant(
         Type.comptime_float,
-        try Value.Tag.float_128.create(arena, number),
+        try sema.mod.floatValue(Type.comptime_float, number),
     );
 }
 
@@ -9897,7 +9895,7 @@ fn zirFloatCast(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
     }
 
     if (try sema.resolveMaybeUndefVal(operand)) |operand_val| {
-        return sema.addConstant(dest_ty, try operand_val.floatCast(sema.arena, dest_ty, mod));
+        return sema.addConstant(dest_ty, try operand_val.floatCast(dest_ty, mod));
     }
     if (dest_is_comptime_float) {
         return sema.fail(block, operand_src, "unable to cast runtime value to 'comptime_float'", .{});
@@ -13247,7 +13245,7 @@ fn zirDiv(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Ins
                 if (!lhs_val.isUndef()) {
                     if (try lhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
                         const scalar_zero = switch (scalar_tag) {
-                            .ComptimeFloat, .Float => Value.float_zero, // TODO migrate to internpool
+                            .ComptimeFloat, .Float => try mod.floatValue(resolved_type.scalarType(mod), 0),
                             .ComptimeInt, .Int => try mod.intValue(resolved_type.scalarType(mod), 0),
                             else => unreachable,
                         };
@@ -13386,7 +13384,7 @@ fn zirDivExact(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             } else {
                 if (try lhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
                     const scalar_zero = switch (scalar_tag) {
-                        .ComptimeFloat, .Float => Value.float_zero, // TODO migrate to internpool
+                        .ComptimeFloat, .Float => try mod.floatValue(resolved_type.scalarType(mod), 0),
                         .ComptimeInt, .Int => try mod.intValue(resolved_type.scalarType(mod), 0),
                         else => unreachable,
                     };
@@ -13471,7 +13469,7 @@ fn zirDivExact(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             const remainder = try block.addBinOp(.rem, casted_lhs, casted_rhs);
 
             const scalar_zero = switch (scalar_tag) {
-                .ComptimeFloat, .Float => Value.float_zero, // TODO migrate to internpool
+                .ComptimeFloat, .Float => try mod.floatValue(resolved_type.scalarType(mod), 0),
                 .ComptimeInt, .Int => try mod.intValue(resolved_type.scalarType(mod), 0),
                 else => unreachable,
             };
@@ -13561,7 +13559,7 @@ fn zirDivFloor(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             if (!lhs_val.isUndef()) {
                 if (try lhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
                     const scalar_zero = switch (scalar_tag) {
-                        .ComptimeFloat, .Float => Value.float_zero, // TODO migrate to internpool
+                        .ComptimeFloat, .Float => try mod.floatValue(resolved_type.scalarType(mod), 0),
                         .ComptimeInt, .Int => try mod.intValue(resolved_type.scalarType(mod), 0),
                         else => unreachable,
                     };
@@ -13682,7 +13680,7 @@ fn zirDivTrunc(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             if (!lhs_val.isUndef()) {
                 if (try lhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
                     const scalar_zero = switch (scalar_tag) {
-                        .ComptimeFloat, .Float => Value.float_zero, // TODO migrate to internpool
+                        .ComptimeFloat, .Float => try mod.floatValue(resolved_type.scalarType(mod), 0),
                         .ComptimeInt, .Int => try mod.intValue(resolved_type.scalarType(mod), 0),
                         else => unreachable,
                     };
@@ -13840,7 +13838,10 @@ fn addDivByZeroSafety(
     if (maybe_rhs_val != null) return;
 
     const mod = sema.mod;
-    const scalar_zero = if (is_int) try mod.intValue(resolved_type.scalarType(mod), 0) else Value.float_zero; // TODO migrate to internpool
+    const scalar_zero = if (is_int)
+        try mod.intValue(resolved_type.scalarType(mod), 0)
+    else
+        try mod.floatValue(resolved_type.scalarType(mod), 0);
     const ok = if (resolved_type.zigTypeTag(mod) == .Vector) ok: {
         const zero_val = try Value.Tag.repeated.create(sema.arena, scalar_zero);
         const zero = try sema.addConstant(resolved_type, zero_val);
@@ -13926,7 +13927,7 @@ fn zirModRem(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
                 }
                 if (try lhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
                     const scalar_zero = switch (scalar_tag) {
-                        .ComptimeFloat, .Float => Value.float_zero, // TODO migrate to internpool
+                        .ComptimeFloat, .Float => try mod.floatValue(resolved_type.scalarType(mod), 0),
                         .ComptimeInt, .Int => try mod.intValue(resolved_type.scalarType(mod), 0),
                         else => unreachable,
                     };
@@ -14586,7 +14587,7 @@ fn analyzeArithmetic(
                         } else {
                             return sema.addConstant(
                                 resolved_type,
-                                try sema.floatAdd(lhs_val, rhs_val, resolved_type),
+                                try Value.floatAdd(lhs_val, rhs_val, resolved_type, sema.arena, mod),
                             );
                         }
                     } else break :rs .{ .src = rhs_src, .air_tag = air_tag };
@@ -14683,7 +14684,7 @@ fn analyzeArithmetic(
                         } else {
                             return sema.addConstant(
                                 resolved_type,
-                                try sema.floatSub(lhs_val, rhs_val, resolved_type),
+                                try Value.floatSub(lhs_val, rhs_val, resolved_type, sema.arena, mod),
                             );
                         }
                     } else break :rs .{ .src = rhs_src, .air_tag = air_tag };
@@ -14753,22 +14754,25 @@ fn analyzeArithmetic(
                 // the result is nan.
                 // If either of the operands are nan, the result is nan.
                 const scalar_zero = switch (scalar_tag) {
-                    .ComptimeFloat, .Float => Value.float_zero, // TODO migrate to internpool
+                    .ComptimeFloat, .Float => try mod.floatValue(resolved_type.scalarType(mod), 0),
                     .ComptimeInt, .Int => try mod.intValue(resolved_type.scalarType(mod), 0),
                     else => unreachable,
                 };
                 if (maybe_lhs_val) |lhs_val| {
                     if (!lhs_val.isUndef()) {
-                        if (lhs_val.isNan()) {
+                        if (lhs_val.isNan(mod)) {
                             return sema.addConstant(resolved_type, lhs_val);
                         }
                         if (try lhs_val.compareAllWithZeroAdvanced(.eq, sema)) lz: {
                             if (maybe_rhs_val) |rhs_val| {
-                                if (rhs_val.isNan()) {
+                                if (rhs_val.isNan(mod)) {
                                     return sema.addConstant(resolved_type, rhs_val);
                                 }
-                                if (rhs_val.isInf()) {
-                                    return sema.addConstant(resolved_type, try Value.Tag.float_32.create(sema.arena, std.math.nan_f32));
+                                if (rhs_val.isInf(mod)) {
+                                    return sema.addConstant(
+                                        resolved_type,
+                                        try mod.floatValue(resolved_type, std.math.nan_f128),
+                                    );
                                 }
                             } else if (resolved_type.isAnyFloat()) {
                                 break :lz;
@@ -14792,13 +14796,16 @@ fn analyzeArithmetic(
                             return sema.addConstUndef(resolved_type);
                         }
                     }
-                    if (rhs_val.isNan()) {
+                    if (rhs_val.isNan(mod)) {
                         return sema.addConstant(resolved_type, rhs_val);
                     }
                     if (try rhs_val.compareAllWithZeroAdvanced(.eq, sema)) rz: {
                         if (maybe_lhs_val) |lhs_val| {
-                            if (lhs_val.isInf()) {
-                                return sema.addConstant(resolved_type, try Value.Tag.float_32.create(sema.arena, std.math.nan_f32));
+                            if (lhs_val.isInf(mod)) {
+                                return sema.addConstant(
+                                    resolved_type,
+                                    try mod.floatValue(resolved_type, std.math.nan_f128),
+                                );
                             }
                         } else if (resolved_type.isAnyFloat()) {
                             break :rz;
@@ -14841,7 +14848,7 @@ fn analyzeArithmetic(
                 // If either of the operands are one, result is the other operand.
                 // If either of the operands are undefined, result is undefined.
                 const scalar_zero = switch (scalar_tag) {
-                    .ComptimeFloat, .Float => Value.float_zero, // TODO migrate to internpool
+                    .ComptimeFloat, .Float => try mod.floatValue(resolved_type.scalarType(mod), 0),
                     .ComptimeInt, .Int => try mod.intValue(resolved_type.scalarType(mod), 0),
                     else => unreachable,
                 };
@@ -14889,7 +14896,7 @@ fn analyzeArithmetic(
                 // If either of the operands are one, result is the other operand.
                 // If either of the operands are undefined, result is undefined.
                 const scalar_zero = switch (scalar_tag) {
-                    .ComptimeFloat, .Float => Value.float_zero, // TODO migrate to internpool
+                    .ComptimeFloat, .Float => try mod.floatValue(resolved_type.scalarType(mod), 0),
                     .ComptimeInt, .Int => try mod.intValue(resolved_type.scalarType(mod), 0),
                     else => unreachable,
                 };
@@ -19102,7 +19109,7 @@ fn zirReify(
             const new_namespace = mod.namespacePtr(new_namespace_index);
             errdefer mod.destroyNamespace(new_namespace_index);
 
-            const opaque_ty = try mod.intern_pool.get(gpa, .{ .opaque_type = .{
+            const opaque_ty = try mod.intern(.{ .opaque_type = .{
                 .decl = new_decl_index,
                 .namespace = new_namespace_index,
             } });
@@ -25592,7 +25599,7 @@ fn coerceExtra(
                 // Keep the comptime Value representation; take the new type.
                 return sema.addConstant(dest_ty, val);
             } else {
-                const new_val = try mod.intern_pool.getCoerced(mod.gpa, val.ip_index, dest_ty.ip_index);
+                const new_val = try mod.intern_pool.getCoerced(sema.gpa, val.ip_index, dest_ty.ip_index);
                 return sema.addConstant(dest_ty, new_val.toValue());
             }
         }
@@ -25946,7 +25953,7 @@ fn coerceExtra(
                     break :float;
                 };
 
-                if (val.floatHasFraction()) {
+                if (val.floatHasFraction(mod)) {
                     return sema.fail(
                         block,
                         inst_src,
@@ -25995,7 +26002,7 @@ fn coerceExtra(
         .Float, .ComptimeFloat => switch (inst_ty.zigTypeTag(mod)) {
             .ComptimeFloat => {
                 const val = try sema.resolveConstValue(block, .unneeded, inst, "");
-                const result_val = try val.floatCast(sema.arena, dest_ty, mod);
+                const result_val = try val.floatCast(dest_ty, mod);
                 return try sema.addConstant(dest_ty, result_val);
             },
             .Float => {
@@ -26003,7 +26010,7 @@ fn coerceExtra(
                     return sema.addConstUndef(dest_ty);
                 }
                 if (try sema.resolveMaybeUndefVal(inst)) |val| {
-                    const result_val = try val.floatCast(sema.arena, dest_ty, mod);
+                    const result_val = try val.floatCast(dest_ty, mod);
                     if (!val.eql(result_val, inst_ty, sema.mod)) {
                         return sema.fail(
                             block,
@@ -29961,7 +29968,7 @@ fn cmpNumeric(
                 if (lhs_val.isUndef() or rhs_val.isUndef()) {
                     return sema.addConstUndef(Type.bool);
                 }
-                if (lhs_val.isNan() or rhs_val.isNan()) {
+                if (lhs_val.isNan(mod) or rhs_val.isNan(mod)) {
                     if (op == std.math.CompareOperator.neq) {
                         return Air.Inst.Ref.bool_true;
                     } else {
@@ -30056,15 +30063,15 @@ fn cmpNumeric(
         try sema.resolveLazyValue(lhs_val);
         if (lhs_val.isUndef())
             return sema.addConstUndef(Type.bool);
-        if (lhs_val.isNan()) switch (op) {
+        if (lhs_val.isNan(mod)) switch (op) {
             .neq => return Air.Inst.Ref.bool_true,
             else => return Air.Inst.Ref.bool_false,
         };
-        if (lhs_val.isInf()) switch (op) {
+        if (lhs_val.isInf(mod)) switch (op) {
             .neq => return Air.Inst.Ref.bool_true,
             .eq => return Air.Inst.Ref.bool_false,
-            .gt, .gte => return if (lhs_val.isNegativeInf()) Air.Inst.Ref.bool_false else Air.Inst.Ref.bool_true,
-            .lt, .lte => return if (lhs_val.isNegativeInf()) Air.Inst.Ref.bool_true else Air.Inst.Ref.bool_false,
+            .gt, .gte => return if (lhs_val.isNegativeInf(mod)) Air.Inst.Ref.bool_false else Air.Inst.Ref.bool_true,
+            .lt, .lte => return if (lhs_val.isNegativeInf(mod)) Air.Inst.Ref.bool_true else Air.Inst.Ref.bool_false,
         };
         if (!rhs_is_signed) {
             switch (lhs_val.orderAgainstZero(mod)) {
@@ -30081,7 +30088,7 @@ fn cmpNumeric(
             }
         }
         if (lhs_is_float) {
-            if (lhs_val.floatHasFraction()) {
+            if (lhs_val.floatHasFraction(mod)) {
                 switch (op) {
                     .eq => return Air.Inst.Ref.bool_false,
                     .neq => return Air.Inst.Ref.bool_true,
@@ -30091,7 +30098,7 @@ fn cmpNumeric(
 
             var bigint = try float128IntPartToBigInt(sema.gpa, lhs_val.toFloat(f128, mod));
             defer bigint.deinit();
-            if (lhs_val.floatHasFraction()) {
+            if (lhs_val.floatHasFraction(mod)) {
                 if (lhs_is_signed) {
                     try bigint.addScalar(&bigint, -1);
                 } else {
@@ -30115,15 +30122,15 @@ fn cmpNumeric(
         try sema.resolveLazyValue(rhs_val);
         if (rhs_val.isUndef())
             return sema.addConstUndef(Type.bool);
-        if (rhs_val.isNan()) switch (op) {
+        if (rhs_val.isNan(mod)) switch (op) {
             .neq => return Air.Inst.Ref.bool_true,
             else => return Air.Inst.Ref.bool_false,
         };
-        if (rhs_val.isInf()) switch (op) {
+        if (rhs_val.isInf(mod)) switch (op) {
             .neq => return Air.Inst.Ref.bool_true,
             .eq => return Air.Inst.Ref.bool_false,
-            .gt, .gte => return if (rhs_val.isNegativeInf()) Air.Inst.Ref.bool_true else Air.Inst.Ref.bool_false,
-            .lt, .lte => return if (rhs_val.isNegativeInf()) Air.Inst.Ref.bool_false else Air.Inst.Ref.bool_true,
+            .gt, .gte => return if (rhs_val.isNegativeInf(mod)) Air.Inst.Ref.bool_true else Air.Inst.Ref.bool_false,
+            .lt, .lte => return if (rhs_val.isNegativeInf(mod)) Air.Inst.Ref.bool_false else Air.Inst.Ref.bool_true,
         };
         if (!lhs_is_signed) {
             switch (rhs_val.orderAgainstZero(mod)) {
@@ -30140,7 +30147,7 @@ fn cmpNumeric(
             }
         }
         if (rhs_is_float) {
-            if (rhs_val.floatHasFraction()) {
+            if (rhs_val.floatHasFraction(mod)) {
                 switch (op) {
                     .eq => return Air.Inst.Ref.bool_false,
                     .neq => return Air.Inst.Ref.bool_true,
@@ -30150,7 +30157,7 @@ fn cmpNumeric(
 
             var bigint = try float128IntPartToBigInt(sema.gpa, rhs_val.toFloat(f128, mod));
             defer bigint.deinit();
-            if (rhs_val.floatHasFraction()) {
+            if (rhs_val.floatHasFraction(mod)) {
                 if (rhs_is_signed) {
                     try bigint.addScalar(&bigint, -1);
                 } else {
@@ -31599,6 +31606,7 @@ pub fn resolveTypeRequiresComptime(sema: *Sema, ty: Type) CompileError!bool {
             .simple_value => unreachable,
             .extern_func => unreachable,
             .int => unreachable,
+            .float => unreachable,
             .ptr => unreachable,
             .opt => unreachable,
             .enum_tag => unreachable,
@@ -33102,6 +33110,7 @@ pub fn typeHasOnePossibleValue(sema: *Sema, ty: Type) CompileError!?Value {
             .simple_value => unreachable,
             .extern_func => unreachable,
             .int => unreachable,
+            .float => unreachable,
             .ptr => unreachable,
             .opt => unreachable,
             .enum_tag => unreachable,
@@ -33663,6 +33672,7 @@ pub fn typeRequiresComptime(sema: *Sema, ty: Type) CompileError!bool {
             .simple_value => unreachable,
             .extern_func => unreachable,
             .int => unreachable,
+            .float => unreachable,
             .ptr => unreachable,
             .opt => unreachable,
             .enum_tag => unreachable,
@@ -33821,7 +33831,7 @@ fn numberAddWrapScalar(
     }
 
     if (ty.isAnyFloat()) {
-        return sema.floatAdd(lhs, rhs, ty);
+        return Value.floatAdd(lhs, rhs, ty, sema.arena, mod);
     }
 
     const overflow_result = try sema.intAddWithOverflow(lhs, rhs, ty);
@@ -33875,125 +33885,11 @@ fn numberSubWrapScalar(
     }
 
     if (ty.isAnyFloat()) {
-        return sema.floatSub(lhs, rhs, ty);
+        return Value.floatSub(lhs, rhs, ty, sema.arena, mod);
     }
 
     const overflow_result = try sema.intSubWithOverflow(lhs, rhs, ty);
     return overflow_result.wrapped_result;
-}
-
-fn floatAdd(
-    sema: *Sema,
-    lhs: Value,
-    rhs: Value,
-    float_type: Type,
-) !Value {
-    const mod = sema.mod;
-    if (float_type.zigTypeTag(mod) == .Vector) {
-        const result_data = try sema.arena.alloc(Value, float_type.vectorLen(mod));
-        for (result_data, 0..) |*scalar, i| {
-            const lhs_elem = try lhs.elemValue(sema.mod, i);
-            const rhs_elem = try rhs.elemValue(sema.mod, i);
-            scalar.* = try sema.floatAddScalar(lhs_elem, rhs_elem, float_type.scalarType(mod));
-        }
-        return Value.Tag.aggregate.create(sema.arena, result_data);
-    }
-    return sema.floatAddScalar(lhs, rhs, float_type);
-}
-
-fn floatAddScalar(
-    sema: *Sema,
-    lhs: Value,
-    rhs: Value,
-    float_type: Type,
-) !Value {
-    const mod = sema.mod;
-    const target = sema.mod.getTarget();
-    switch (float_type.floatBits(target)) {
-        16 => {
-            const lhs_val = lhs.toFloat(f16, mod);
-            const rhs_val = rhs.toFloat(f16, mod);
-            return Value.Tag.float_16.create(sema.arena, lhs_val + rhs_val);
-        },
-        32 => {
-            const lhs_val = lhs.toFloat(f32, mod);
-            const rhs_val = rhs.toFloat(f32, mod);
-            return Value.Tag.float_32.create(sema.arena, lhs_val + rhs_val);
-        },
-        64 => {
-            const lhs_val = lhs.toFloat(f64, mod);
-            const rhs_val = rhs.toFloat(f64, mod);
-            return Value.Tag.float_64.create(sema.arena, lhs_val + rhs_val);
-        },
-        80 => {
-            const lhs_val = lhs.toFloat(f80, mod);
-            const rhs_val = rhs.toFloat(f80, mod);
-            return Value.Tag.float_80.create(sema.arena, lhs_val + rhs_val);
-        },
-        128 => {
-            const lhs_val = lhs.toFloat(f128, mod);
-            const rhs_val = rhs.toFloat(f128, mod);
-            return Value.Tag.float_128.create(sema.arena, lhs_val + rhs_val);
-        },
-        else => unreachable,
-    }
-}
-
-fn floatSub(
-    sema: *Sema,
-    lhs: Value,
-    rhs: Value,
-    float_type: Type,
-) !Value {
-    const mod = sema.mod;
-    if (float_type.zigTypeTag(mod) == .Vector) {
-        const result_data = try sema.arena.alloc(Value, float_type.vectorLen(mod));
-        for (result_data, 0..) |*scalar, i| {
-            const lhs_elem = try lhs.elemValue(sema.mod, i);
-            const rhs_elem = try rhs.elemValue(sema.mod, i);
-            scalar.* = try sema.floatSubScalar(lhs_elem, rhs_elem, float_type.scalarType(mod));
-        }
-        return Value.Tag.aggregate.create(sema.arena, result_data);
-    }
-    return sema.floatSubScalar(lhs, rhs, float_type);
-}
-
-fn floatSubScalar(
-    sema: *Sema,
-    lhs: Value,
-    rhs: Value,
-    float_type: Type,
-) !Value {
-    const mod = sema.mod;
-    const target = sema.mod.getTarget();
-    switch (float_type.floatBits(target)) {
-        16 => {
-            const lhs_val = lhs.toFloat(f16, mod);
-            const rhs_val = rhs.toFloat(f16, mod);
-            return Value.Tag.float_16.create(sema.arena, lhs_val - rhs_val);
-        },
-        32 => {
-            const lhs_val = lhs.toFloat(f32, mod);
-            const rhs_val = rhs.toFloat(f32, mod);
-            return Value.Tag.float_32.create(sema.arena, lhs_val - rhs_val);
-        },
-        64 => {
-            const lhs_val = lhs.toFloat(f64, mod);
-            const rhs_val = rhs.toFloat(f64, mod);
-            return Value.Tag.float_64.create(sema.arena, lhs_val - rhs_val);
-        },
-        80 => {
-            const lhs_val = lhs.toFloat(f80, mod);
-            const rhs_val = rhs.toFloat(f80, mod);
-            return Value.Tag.float_80.create(sema.arena, lhs_val - rhs_val);
-        },
-        128 => {
-            const lhs_val = lhs.toFloat(f128, mod);
-            const rhs_val = rhs.toFloat(f128, mod);
-            return Value.Tag.float_128.create(sema.arena, lhs_val - rhs_val);
-        },
-        else => unreachable,
-    }
 }
 
 fn intSubWithOverflow(
