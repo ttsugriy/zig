@@ -714,7 +714,7 @@ pub const DeclGen = struct {
                     if (ty.isSimpleTupleOrAnonStruct()) {
                         unreachable; // TODO
                     } else {
-                        const struct_ty = ty.castTag(.@"struct").?.data;
+                        const struct_ty = mod.typeToStruct(ty).?;
 
                         if (struct_ty.layout == .Packed) {
                             return dg.todo("packed struct constants", .{});
@@ -1289,7 +1289,7 @@ pub const DeclGen = struct {
                     return try self.spv.resolveType(SpvType.initPayload(&payload.base));
                 }
 
-                const struct_ty = ty.castTag(.@"struct").?.data;
+                const struct_ty = mod.typeToStruct(ty).?;
 
                 if (struct_ty.layout == .Packed) {
                     return try self.resolveType(struct_ty.backing_int_ty, .indirect);
@@ -2341,7 +2341,7 @@ pub const DeclGen = struct {
         const struct_ty = self.typeOf(struct_field.struct_operand);
         const object = try self.resolve(struct_field.struct_operand);
         const field_index = struct_field.field_index;
-        const field_ty = struct_ty.structFieldType(field_index);
+        const field_ty = struct_ty.structFieldType(field_index, mod);
         const field_ty_id = try self.resolveTypeId(field_ty);
 
         if (!field_ty.hasRuntimeBitsIgnoreComptime(mod)) return null;
@@ -2369,7 +2369,7 @@ pub const DeclGen = struct {
         const mod = self.module;
         const object_ty = object_ptr_ty.childType(mod);
         switch (object_ty.zigTypeTag(mod)) {
-            .Struct => switch (object_ty.containerLayout()) {
+            .Struct => switch (object_ty.containerLayout(mod)) {
                 .Packed => unreachable, // TODO
                 else => {
                     const u32_ty_id = self.typeId(try self.intType(.unsigned, 32));
