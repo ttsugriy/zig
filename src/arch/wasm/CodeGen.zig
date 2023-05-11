@@ -4940,7 +4940,7 @@ fn airUnionInit(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
         const result_ptr = try func.allocStack(union_ty);
         const payload = try func.resolveInst(extra.init);
-        const union_obj = union_ty.cast(Type.Payload.Union).?.data;
+        const union_obj = mod.typeToUnion(union_ty).?;
         assert(union_obj.haveFieldTypes());
         const field = union_obj.fields.values()[extra.field_index];
 
