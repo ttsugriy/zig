@@ -647,7 +647,7 @@ pub const DeclGen = struct {
             const dg = self.dg;
             const mod = dg.module;
 
-            if (val.isUndef()) {
+            if (val.isUndef(mod)) {
                 const size = ty.abiSize(mod);
                 return try self.addUndef(size);
             }
@@ -911,7 +911,7 @@ pub const DeclGen = struct {
         // const target = self.getTarget();
 
         // TODO: Fix the resulting global linking for these paths.
-        // if (val.isUndef()) {
+        // if (val.isUndef(mod)) {
         //     // Special case: the entire value is undefined. In this case, we can just
         //     // generate an OpVariable with no initializer.
         //     return try section.emit(self.spv.gpa, .OpVariable, .{
@@ -1006,7 +1006,7 @@ pub const DeclGen = struct {
         const result_ty_id = self.typeId(result_ty_ref);
         const result_id = self.spv.allocId();
 
-        if (val.isUndef()) {
+        if (val.isUndef(mod)) {
             try section.emit(self.spv.gpa, .OpUndef, .{
                 .id_result_type = result_ty_id,
                 .id_result = result_id,
@@ -2036,7 +2036,7 @@ pub const DeclGen = struct {
         var i: usize = 0;
         while (i < mask_len) : (i += 1) {
             const elem = try mask.elemValue(self.module, i);
-            if (elem.isUndef()) {
+            if (elem.isUndef(mod)) {
                 self.func.body.writeOperand(spec.LiteralInteger, 0xFFFF_FFFF);
             } else {
                 const int = elem.toSignedInt(mod);

@@ -1904,8 +1904,9 @@ fn resolveDefinedValue(
     src: LazySrcLoc,
     air_ref: Air.Inst.Ref,
 ) CompileError!?Value {
+    const mod = sema.mod;
     if (try sema.resolveMaybeUndefVal(air_ref)) |val| {
-        if (val.isUndef()) {
+        if (val.isUndef(mod)) {
             if (block.is_typeof) return null;
             return sema.failWithUseOfUndef(block, src);
         }
@@ -4330,7 +4331,7 @@ fn validateUnionInit(
 
     const tag_ty = union_ty.unionTagTypeHypothetical(mod);
     const enum_field_index = @intCast(u32, tag_ty.enumFieldIndex(field_name, mod).?);
-    const tag_val = try Value.Tag.enum_field_index.create(sema.arena, enum_field_index);
+    const tag_val = try mod.enumValueFieldIndex(tag_ty, enum_field_index);
 
     if (init_val) |val| {
         // Our task is to delete all the `field_ptr` and `store` instructions, and insert
@@ -4829,7 +4830,7 @@ fn zirValidateDeref(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileErr
 
     const elem_ty = operand_ty.elemType2(mod);
     if (try sema.resolveMaybeUndefVal(operand)) |val| {
-        if (val.isUndef()) {
+        if (val.isUndef(mod)) {
             return sema.fail(block, src, "cannot dereference undefined value", .{});
         }
     } else if (!(try sema.validateRunTimeType(elem_ty, false))) {
@@ -6190,15 +6191,16 @@ fn lookupInNamespace(
 }
 
 fn funcDeclSrc(sema: *Sema, func_inst: Air.Inst.Ref) !?*Decl {
+    const mod = sema.mod;
     const func_val = (try sema.resolveMaybeUndefVal(func_inst)) orelse return null;
-    if (func_val.isUndef()) return null;
+    if (func_val.isUndef(mod)) return null;
     const owner_decl_index = switch (func_val.tag()) {
         .extern_fn => func_val.castTag(.extern_fn).?.data.owner_decl,
         .function => func_val.castTag(.function).?.data.owner_decl,
-        .decl_ref => sema.mod.declPtr(func_val.castTag(.decl_ref).?.data).val.castTag(.function).?.data.owner_decl,
+        .decl_ref => mod.declPtr(func_val.castTag(.decl_ref).?.data).val.castTag(.function).?.data.owner_decl,
         else => return null,
     };
-    return sema.mod.declPtr(owner_decl_index);
+    return mod.declPtr(owner_decl_index);
 }
 
 pub fn analyzeSaveErrRetIndex(sema: *Sema, block: *Block) SemaError!Air.Inst.Ref {
@@ -8051,7 +8053,7 @@ fn zirErrorToInt(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstDat
     const operand = try sema.coerce(block, Type.anyerror, uncasted_operand, operand_src);
 
     if (try sema.resolveMaybeUndefVal(operand)) |val| {
-        if (val.isUndef()) {
+        if (val.isUndef(mod)) {
             return sema.addConstUndef(Type.err_int);
         }
         switch (val.tag()) {
@@ -8271,7 +8273,7 @@ fn zirIntToEnum(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
             };
             return sema.failWithOwnedErrorMsg(msg);
         }
-        if (int_val.isUndef()) {
+        if (int_val.isUndef(mod)) {
             return sema.failWithUseOfUndef(block, operand_src);
         }
         if (!(try sema.enumHasInt(dest_ty, int_val))) {
@@ -11417,7 +11419,7 @@ fn zirSwitchBlock(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError
                     if (f != null) continue;
                     cases_len += 1;
 
-                    const item_val = try Value.Tag.enum_field_index.create(sema.arena, @intCast(u32, i));
+                    const item_val = try mod.enumValueFieldIndex(operand_ty, @intCast(u32, i));
                     const item_ref = try sema.addConstant(operand_ty, item_val);
                     case_block.inline_case_capture = item_ref;
 
@@ -12153,7 +12155,7 @@ fn zirShl(
     const maybe_rhs_val = try sema.resolveMaybeUndefValIntable(rhs);
 
     if (maybe_rhs_val) |rhs_val| {
-        if (rhs_val.isUndef()) {
+        if (rhs_val.isUndef(mod)) {
             return sema.addConstUndef(sema.typeOf(lhs));
         }
         // If rhs is 0, return lhs without doing any calculations.
@@ -12200,7 +12202,7 @@ fn zirShl(
     }
 
     const runtime_src = if (maybe_lhs_val) |lhs_val| rs: {
-        if (lhs_val.isUndef()) return sema.addConstUndef(lhs_ty);
+        if (lhs_val.isUndef(mod)) return sema.addConstUndef(lhs_ty);
         const rhs_val = maybe_rhs_val orelse {
             if (scalar_ty.zigTypeTag(mod) == .ComptimeInt) {
                 return sema.fail(block, src, "LHS of shift must be a fixed-width integer type, or RHS must be comptime-known", .{});
@@ -12334,7 +12336,7 @@ fn zirShr(
     const maybe_rhs_val = try sema.resolveMaybeUndefValIntable(rhs);
 
     const runtime_src = if (maybe_rhs_val) |rhs_val| rs: {
-        if (rhs_val.isUndef()) {
+        if (rhs_val.isUndef(mod)) {
             return sema.addConstUndef(lhs_ty);
         }
         // If rhs is 0, return lhs without doing any calculations.
@@ -12379,7 +12381,7 @@ fn zirShr(
             });
         }
         if (maybe_lhs_val) |lhs_val| {
-            if (lhs_val.isUndef()) {
+            if (lhs_val.isUndef(mod)) {
                 return sema.addConstUndef(lhs_ty);
             }
             if (air_tag == .shr_exact) {
@@ -12523,7 +12525,7 @@ fn zirBitNot(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
     }
 
     if (try sema.resolveMaybeUndefVal(operand)) |val| {
-        if (val.isUndef()) {
+        if (val.isUndef(mod)) {
             return sema.addConstUndef(operand_type);
         } else if (operand_type.zigTypeTag(mod) == .Vector) {
             const vec_len = try sema.usizeCast(block, operand_src, operand_type.vectorLen(mod));
@@ -13099,7 +13101,7 @@ fn zirNegate(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
     if (rhs_scalar_ty.isAnyFloat()) {
         // We handle float negation here to ensure negative zero is represented in the bits.
         if (try sema.resolveMaybeUndefVal(rhs)) |rhs_val| {
-            if (rhs_val.isUndef()) return sema.addConstUndef(rhs_ty);
+            if (rhs_val.isUndef(mod)) return sema.addConstUndef(rhs_ty);
             return sema.addConstant(rhs_ty, try rhs_val.floatNeg(rhs_ty, sema.arena, sema.mod));
         }
         try sema.requireRuntimeBlock(block, src, null);
@@ -13242,7 +13244,7 @@ fn zirDiv(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Ins
     switch (scalar_tag) {
         .Int, .ComptimeInt, .ComptimeFloat => {
             if (maybe_lhs_val) |lhs_val| {
-                if (!lhs_val.isUndef()) {
+                if (!lhs_val.isUndef(mod)) {
                     if (try lhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
                         const scalar_zero = switch (scalar_tag) {
                             .ComptimeFloat, .Float => try mod.floatValue(resolved_type.scalarType(mod), 0),
@@ -13257,7 +13259,7 @@ fn zirDiv(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Ins
                 }
             }
             if (maybe_rhs_val) |rhs_val| {
-                if (rhs_val.isUndef()) {
+                if (rhs_val.isUndef(mod)) {
                     return sema.failWithUseOfUndef(block, rhs_src);
                 }
                 if (!(try rhs_val.compareAllWithZeroAdvanced(.neq, sema))) {
@@ -13271,7 +13273,7 @@ fn zirDiv(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Ins
 
     const runtime_src = rs: {
         if (maybe_lhs_val) |lhs_val| {
-            if (lhs_val.isUndef()) {
+            if (lhs_val.isUndef(mod)) {
                 if (lhs_scalar_ty.isSignedInt(mod) and rhs_scalar_ty.isSignedInt(mod)) {
                     if (maybe_rhs_val) |rhs_val| {
                         if (try sema.compareAll(rhs_val, .neq, try mod.intValue(resolved_type, -1), resolved_type)) {
@@ -13379,7 +13381,7 @@ fn zirDivExact(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
         // If the lhs is undefined, compile error because there is a possible
         // value for which the division would result in a remainder.
         if (maybe_lhs_val) |lhs_val| {
-            if (lhs_val.isUndef()) {
+            if (lhs_val.isUndef(mod)) {
                 return sema.failWithUseOfUndef(block, rhs_src);
             } else {
                 if (try lhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
@@ -13396,7 +13398,7 @@ fn zirDivExact(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             }
         }
         if (maybe_rhs_val) |rhs_val| {
-            if (rhs_val.isUndef()) {
+            if (rhs_val.isUndef(mod)) {
                 return sema.failWithUseOfUndef(block, rhs_src);
             }
             if (!(try rhs_val.compareAllWithZeroAdvanced(.neq, sema))) {
@@ -13556,7 +13558,7 @@ fn zirDivFloor(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
         // value (zero) for which the division would be illegal behavior.
         // If the lhs is undefined, result is undefined.
         if (maybe_lhs_val) |lhs_val| {
-            if (!lhs_val.isUndef()) {
+            if (!lhs_val.isUndef(mod)) {
                 if (try lhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
                     const scalar_zero = switch (scalar_tag) {
                         .ComptimeFloat, .Float => try mod.floatValue(resolved_type.scalarType(mod), 0),
@@ -13571,7 +13573,7 @@ fn zirDivFloor(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             }
         }
         if (maybe_rhs_val) |rhs_val| {
-            if (rhs_val.isUndef()) {
+            if (rhs_val.isUndef(mod)) {
                 return sema.failWithUseOfUndef(block, rhs_src);
             }
             if (!(try rhs_val.compareAllWithZeroAdvanced(.neq, sema))) {
@@ -13580,7 +13582,7 @@ fn zirDivFloor(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             // TODO: if the RHS is one, return the LHS directly
         }
         if (maybe_lhs_val) |lhs_val| {
-            if (lhs_val.isUndef()) {
+            if (lhs_val.isUndef(mod)) {
                 if (lhs_scalar_ty.isSignedInt(mod) and rhs_scalar_ty.isSignedInt(mod)) {
                     if (maybe_rhs_val) |rhs_val| {
                         if (try sema.compareAll(rhs_val, .neq, try mod.intValue(resolved_type, -1), resolved_type)) {
@@ -13677,7 +13679,7 @@ fn zirDivTrunc(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
         // value (zero) for which the division would be illegal behavior.
         // If the lhs is undefined, result is undefined.
         if (maybe_lhs_val) |lhs_val| {
-            if (!lhs_val.isUndef()) {
+            if (!lhs_val.isUndef(mod)) {
                 if (try lhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
                     const scalar_zero = switch (scalar_tag) {
                         .ComptimeFloat, .Float => try mod.floatValue(resolved_type.scalarType(mod), 0),
@@ -13692,7 +13694,7 @@ fn zirDivTrunc(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             }
         }
         if (maybe_rhs_val) |rhs_val| {
-            if (rhs_val.isUndef()) {
+            if (rhs_val.isUndef(mod)) {
                 return sema.failWithUseOfUndef(block, rhs_src);
             }
             if (!(try rhs_val.compareAllWithZeroAdvanced(.neq, sema))) {
@@ -13700,7 +13702,7 @@ fn zirDivTrunc(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             }
         }
         if (maybe_lhs_val) |lhs_val| {
-            if (lhs_val.isUndef()) {
+            if (lhs_val.isUndef(mod)) {
                 if (lhs_scalar_ty.isSignedInt(mod) and rhs_scalar_ty.isSignedInt(mod)) {
                     if (maybe_rhs_val) |rhs_val| {
                         if (try sema.compareAll(rhs_val, .neq, try mod.intValue(resolved_type, -1), resolved_type)) {
@@ -13922,7 +13924,7 @@ fn zirModRem(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
         // then emit a compile error saying you have to pick one.
         if (is_int) {
             if (maybe_lhs_val) |lhs_val| {
-                if (lhs_val.isUndef()) {
+                if (lhs_val.isUndef(mod)) {
                     return sema.failWithUseOfUndef(block, lhs_src);
                 }
                 if (try lhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
@@ -13940,7 +13942,7 @@ fn zirModRem(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
                 return sema.failWithModRemNegative(block, lhs_src, lhs_ty, rhs_ty);
             }
             if (maybe_rhs_val) |rhs_val| {
-                if (rhs_val.isUndef()) {
+                if (rhs_val.isUndef(mod)) {
                     return sema.failWithUseOfUndef(block, rhs_src);
                 }
                 if (!(try rhs_val.compareAllWithZeroAdvanced(.neq, sema))) {
@@ -13969,7 +13971,7 @@ fn zirModRem(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
         }
         // float operands
         if (maybe_rhs_val) |rhs_val| {
-            if (rhs_val.isUndef()) {
+            if (rhs_val.isUndef(mod)) {
                 return sema.failWithUseOfUndef(block, rhs_src);
             }
             if (!(try rhs_val.compareAllWithZeroAdvanced(.neq, sema))) {
@@ -13979,7 +13981,7 @@ fn zirModRem(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
                 return sema.failWithModRemNegative(block, rhs_src, lhs_ty, rhs_ty);
             }
             if (maybe_lhs_val) |lhs_val| {
-                if (lhs_val.isUndef() or !(try lhs_val.compareAllWithZeroAdvanced(.gte, sema))) {
+                if (lhs_val.isUndef(mod) or !(try lhs_val.compareAllWithZeroAdvanced(.gte, sema))) {
                     return sema.failWithModRemNegative(block, lhs_src, lhs_ty, rhs_ty);
                 }
                 return sema.addConstant(
@@ -14100,12 +14102,12 @@ fn zirMod(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Ins
         // If the lhs is undefined, result is undefined.
         if (is_int) {
             if (maybe_lhs_val) |lhs_val| {
-                if (lhs_val.isUndef()) {
+                if (lhs_val.isUndef(mod)) {
                     return sema.failWithUseOfUndef(block, lhs_src);
                 }
             }
             if (maybe_rhs_val) |rhs_val| {
-                if (rhs_val.isUndef()) {
+                if (rhs_val.isUndef(mod)) {
                     return sema.failWithUseOfUndef(block, rhs_src);
                 }
                 if (!(try rhs_val.compareAllWithZeroAdvanced(.neq, sema))) {
@@ -14124,7 +14126,7 @@ fn zirMod(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Ins
         }
         // float operands
         if (maybe_rhs_val) |rhs_val| {
-            if (rhs_val.isUndef()) {
+            if (rhs_val.isUndef(mod)) {
                 return sema.failWithUseOfUndef(block, rhs_src);
             }
             if (!(try rhs_val.compareAllWithZeroAdvanced(.neq, sema))) {
@@ -14132,7 +14134,7 @@ fn zirMod(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Ins
             }
         }
         if (maybe_lhs_val) |lhs_val| {
-            if (lhs_val.isUndef()) {
+            if (lhs_val.isUndef(mod)) {
                 return sema.addConstUndef(resolved_type);
             }
             if (maybe_rhs_val) |rhs_val| {
@@ -14202,12 +14204,12 @@ fn zirRem(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Ins
         // If the lhs is undefined, result is undefined.
         if (is_int) {
             if (maybe_lhs_val) |lhs_val| {
-                if (lhs_val.isUndef()) {
+                if (lhs_val.isUndef(mod)) {
                     return sema.failWithUseOfUndef(block, lhs_src);
                 }
             }
             if (maybe_rhs_val) |rhs_val| {
-                if (rhs_val.isUndef()) {
+                if (rhs_val.isUndef(mod)) {
                     return sema.failWithUseOfUndef(block, rhs_src);
                 }
                 if (!(try rhs_val.compareAllWithZeroAdvanced(.neq, sema))) {
@@ -14226,7 +14228,7 @@ fn zirRem(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Ins
         }
         // float operands
         if (maybe_rhs_val) |rhs_val| {
-            if (rhs_val.isUndef()) {
+            if (rhs_val.isUndef(mod)) {
                 return sema.failWithUseOfUndef(block, rhs_src);
             }
             if (!(try rhs_val.compareAllWithZeroAdvanced(.neq, sema))) {
@@ -14234,7 +14236,7 @@ fn zirRem(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Ins
             }
         }
         if (maybe_lhs_val) |lhs_val| {
-            if (lhs_val.isUndef()) {
+            if (lhs_val.isUndef(mod)) {
                 return sema.addConstUndef(resolved_type);
             }
             if (maybe_rhs_val) |rhs_val| {
@@ -14317,18 +14319,18 @@ fn zirOverflowArithmetic(
                 // to the result, even if it is undefined..
                 // Otherwise, if either of the argument is undefined, undefined is returned.
                 if (maybe_lhs_val) |lhs_val| {
-                    if (!lhs_val.isUndef() and (try lhs_val.compareAllWithZeroAdvanced(.eq, sema))) {
+                    if (!lhs_val.isUndef(mod) and (try lhs_val.compareAllWithZeroAdvanced(.eq, sema))) {
                         break :result .{ .overflow_bit = try maybeRepeated(sema, dest_ty, zero), .inst = rhs };
                     }
                 }
                 if (maybe_rhs_val) |rhs_val| {
-                    if (!rhs_val.isUndef() and (try rhs_val.compareAllWithZeroAdvanced(.eq, sema))) {
+                    if (!rhs_val.isUndef(mod) and (try rhs_val.compareAllWithZeroAdvanced(.eq, sema))) {
                         break :result .{ .overflow_bit = try maybeRepeated(sema, dest_ty, zero), .inst = lhs };
                     }
                 }
                 if (maybe_lhs_val) |lhs_val| {
                     if (maybe_rhs_val) |rhs_val| {
-                        if (lhs_val.isUndef() or rhs_val.isUndef()) {
+                        if (lhs_val.isUndef(mod) or rhs_val.isUndef(mod)) {
                             break :result .{ .overflow_bit = Value.undef, .wrapped = Value.undef };
                         }
 
@@ -14341,12 +14343,12 @@ fn zirOverflowArithmetic(
                 // If the rhs is zero, then the result is lhs and no overflow occured.
                 // Otherwise, if either result is undefined, both results are undefined.
                 if (maybe_rhs_val) |rhs_val| {
-                    if (rhs_val.isUndef()) {
+                    if (rhs_val.isUndef(mod)) {
                         break :result .{ .overflow_bit = Value.undef, .wrapped = Value.undef };
                     } else if (try rhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
                         break :result .{ .overflow_bit = try maybeRepeated(sema, dest_ty, zero), .inst = lhs };
                     } else if (maybe_lhs_val) |lhs_val| {
-                        if (lhs_val.isUndef()) {
+                        if (lhs_val.isUndef(mod)) {
                             break :result .{ .overflow_bit = Value.undef, .wrapped = Value.undef };
                         }
 
@@ -14361,7 +14363,7 @@ fn zirOverflowArithmetic(
                 // Otherwise, if either of the arguments is undefined, both results are undefined.
                 const scalar_one = try mod.intValue(dest_ty.scalarType(mod), 1);
                 if (maybe_lhs_val) |lhs_val| {
-                    if (!lhs_val.isUndef()) {
+                    if (!lhs_val.isUndef(mod)) {
                         if (try lhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
                             break :result .{ .overflow_bit = try maybeRepeated(sema, dest_ty, zero), .inst = lhs };
                         } else if (try sema.compareAll(lhs_val, .eq, try maybeRepeated(sema, dest_ty, scalar_one), dest_ty)) {
@@ -14371,7 +14373,7 @@ fn zirOverflowArithmetic(
                 }
 
                 if (maybe_rhs_val) |rhs_val| {
-                    if (!rhs_val.isUndef()) {
+                    if (!rhs_val.isUndef(mod)) {
                         if (try rhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
                             break :result .{ .overflow_bit = try maybeRepeated(sema, dest_ty, zero), .inst = rhs };
                         } else if (try sema.compareAll(rhs_val, .eq, try maybeRepeated(sema, dest_ty, scalar_one), dest_ty)) {
@@ -14382,7 +14384,7 @@ fn zirOverflowArithmetic(
 
                 if (maybe_lhs_val) |lhs_val| {
                     if (maybe_rhs_val) |rhs_val| {
-                        if (lhs_val.isUndef() or rhs_val.isUndef()) {
+                        if (lhs_val.isUndef(mod) or rhs_val.isUndef(mod)) {
                             break :result .{ .overflow_bit = Value.undef, .wrapped = Value.undef };
                         }
 
@@ -14396,18 +14398,18 @@ fn zirOverflowArithmetic(
                 // If rhs is zero, the result is lhs (even if undefined) and no overflow occurred.
                 // Oterhwise if either of the arguments is undefined, both results are undefined.
                 if (maybe_lhs_val) |lhs_val| {
-                    if (!lhs_val.isUndef() and (try lhs_val.compareAllWithZeroAdvanced(.eq, sema))) {
+                    if (!lhs_val.isUndef(mod) and (try lhs_val.compareAllWithZeroAdvanced(.eq, sema))) {
                         break :result .{ .overflow_bit = try maybeRepeated(sema, dest_ty, zero), .inst = lhs };
                     }
                 }
                 if (maybe_rhs_val) |rhs_val| {
-                    if (!rhs_val.isUndef() and (try rhs_val.compareAllWithZeroAdvanced(.eq, sema))) {
+                    if (!rhs_val.isUndef(mod) and (try rhs_val.compareAllWithZeroAdvanced(.eq, sema))) {
                         break :result .{ .overflow_bit = try maybeRepeated(sema, dest_ty, zero), .inst = lhs };
                     }
                 }
                 if (maybe_lhs_val) |lhs_val| {
                     if (maybe_rhs_val) |rhs_val| {
-                        if (lhs_val.isUndef() or rhs_val.isUndef()) {
+                        if (lhs_val.isUndef(mod) or rhs_val.isUndef(mod)) {
                             break :result .{ .overflow_bit = Value.undef, .wrapped = Value.undef };
                         }
 
@@ -14551,12 +14553,12 @@ fn analyzeArithmetic(
                 // overflow (max_int), causing illegal behavior.
                 // For floats: either operand being undef makes the result undef.
                 if (maybe_lhs_val) |lhs_val| {
-                    if (!lhs_val.isUndef() and (try lhs_val.compareAllWithZeroAdvanced(.eq, sema))) {
+                    if (!lhs_val.isUndef(mod) and (try lhs_val.compareAllWithZeroAdvanced(.eq, sema))) {
                         return casted_rhs;
                     }
                 }
                 if (maybe_rhs_val) |rhs_val| {
-                    if (rhs_val.isUndef()) {
+                    if (rhs_val.isUndef(mod)) {
                         if (is_int) {
                             return sema.failWithUseOfUndef(block, rhs_src);
                         } else {
@@ -14569,7 +14571,7 @@ fn analyzeArithmetic(
                 }
                 const air_tag: Air.Inst.Tag = if (block.float_mode == .Optimized) .add_optimized else .add;
                 if (maybe_lhs_val) |lhs_val| {
-                    if (lhs_val.isUndef()) {
+                    if (lhs_val.isUndef(mod)) {
                         if (is_int) {
                             return sema.failWithUseOfUndef(block, lhs_src);
                         } else {
@@ -14598,13 +14600,13 @@ fn analyzeArithmetic(
                 // If either of the operands are zero, the other operand is returned.
                 // If either of the operands are undefined, the result is undefined.
                 if (maybe_lhs_val) |lhs_val| {
-                    if (!lhs_val.isUndef() and (try lhs_val.compareAllWithZeroAdvanced(.eq, sema))) {
+                    if (!lhs_val.isUndef(mod) and (try lhs_val.compareAllWithZeroAdvanced(.eq, sema))) {
                         return casted_rhs;
                     }
                 }
                 const air_tag: Air.Inst.Tag = if (block.float_mode == .Optimized) .addwrap_optimized else .addwrap;
                 if (maybe_rhs_val) |rhs_val| {
-                    if (rhs_val.isUndef()) {
+                    if (rhs_val.isUndef(mod)) {
                         return sema.addConstUndef(resolved_type);
                     }
                     if (try rhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
@@ -14623,12 +14625,12 @@ fn analyzeArithmetic(
                 // If either of the operands are zero, then the other operand is returned.
                 // If either of the operands are undefined, the result is undefined.
                 if (maybe_lhs_val) |lhs_val| {
-                    if (!lhs_val.isUndef() and (try lhs_val.compareAllWithZeroAdvanced(.eq, sema))) {
+                    if (!lhs_val.isUndef(mod) and (try lhs_val.compareAllWithZeroAdvanced(.eq, sema))) {
                         return casted_rhs;
                     }
                 }
                 if (maybe_rhs_val) |rhs_val| {
-                    if (rhs_val.isUndef()) {
+                    if (rhs_val.isUndef(mod)) {
                         return sema.addConstUndef(resolved_type);
                     }
                     if (try rhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
@@ -14653,7 +14655,7 @@ fn analyzeArithmetic(
                 // overflow, causing illegal behavior.
                 // For floats: either operand being undef makes the result undef.
                 if (maybe_rhs_val) |rhs_val| {
-                    if (rhs_val.isUndef()) {
+                    if (rhs_val.isUndef(mod)) {
                         if (is_int) {
                             return sema.failWithUseOfUndef(block, rhs_src);
                         } else {
@@ -14666,7 +14668,7 @@ fn analyzeArithmetic(
                 }
                 const air_tag: Air.Inst.Tag = if (block.float_mode == .Optimized) .sub_optimized else .sub;
                 if (maybe_lhs_val) |lhs_val| {
-                    if (lhs_val.isUndef()) {
+                    if (lhs_val.isUndef(mod)) {
                         if (is_int) {
                             return sema.failWithUseOfUndef(block, lhs_src);
                         } else {
@@ -14695,7 +14697,7 @@ fn analyzeArithmetic(
                 // If the RHS is zero, then the other operand is returned, even if it is undefined.
                 // If either of the operands are undefined, the result is undefined.
                 if (maybe_rhs_val) |rhs_val| {
-                    if (rhs_val.isUndef()) {
+                    if (rhs_val.isUndef(mod)) {
                         return sema.addConstUndef(resolved_type);
                     }
                     if (try rhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
@@ -14704,7 +14706,7 @@ fn analyzeArithmetic(
                 }
                 const air_tag: Air.Inst.Tag = if (block.float_mode == .Optimized) .subwrap_optimized else .subwrap;
                 if (maybe_lhs_val) |lhs_val| {
-                    if (lhs_val.isUndef()) {
+                    if (lhs_val.isUndef(mod)) {
                         return sema.addConstUndef(resolved_type);
                     }
                     if (maybe_rhs_val) |rhs_val| {
@@ -14720,7 +14722,7 @@ fn analyzeArithmetic(
                 // If the RHS is zero, result is LHS.
                 // If either of the operands are undefined, result is undefined.
                 if (maybe_rhs_val) |rhs_val| {
-                    if (rhs_val.isUndef()) {
+                    if (rhs_val.isUndef(mod)) {
                         return sema.addConstUndef(resolved_type);
                     }
                     if (try rhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
@@ -14728,7 +14730,7 @@ fn analyzeArithmetic(
                     }
                 }
                 if (maybe_lhs_val) |lhs_val| {
-                    if (lhs_val.isUndef()) {
+                    if (lhs_val.isUndef(mod)) {
                         return sema.addConstUndef(resolved_type);
                     }
                     if (maybe_rhs_val) |rhs_val| {
@@ -14759,7 +14761,7 @@ fn analyzeArithmetic(
                     else => unreachable,
                 };
                 if (maybe_lhs_val) |lhs_val| {
-                    if (!lhs_val.isUndef()) {
+                    if (!lhs_val.isUndef(mod)) {
                         if (lhs_val.isNan(mod)) {
                             return sema.addConstant(resolved_type, lhs_val);
                         }
@@ -14789,7 +14791,7 @@ fn analyzeArithmetic(
                 }
                 const air_tag: Air.Inst.Tag = if (block.float_mode == .Optimized) .mul_optimized else .mul;
                 if (maybe_rhs_val) |rhs_val| {
-                    if (rhs_val.isUndef()) {
+                    if (rhs_val.isUndef(mod)) {
                         if (is_int) {
                             return sema.failWithUseOfUndef(block, rhs_src);
                         } else {
@@ -14819,7 +14821,7 @@ fn analyzeArithmetic(
                         return casted_lhs;
                     }
                     if (maybe_lhs_val) |lhs_val| {
-                        if (lhs_val.isUndef()) {
+                        if (lhs_val.isUndef(mod)) {
                             if (is_int) {
                                 return sema.failWithUseOfUndef(block, lhs_src);
                             } else {
@@ -14853,7 +14855,7 @@ fn analyzeArithmetic(
                     else => unreachable,
                 };
                 if (maybe_lhs_val) |lhs_val| {
-                    if (!lhs_val.isUndef()) {
+                    if (!lhs_val.isUndef(mod)) {
                         if (try lhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
                             const zero_val = if (is_vector) b: {
                                 break :b try Value.Tag.repeated.create(sema.arena, scalar_zero);
@@ -14867,7 +14869,7 @@ fn analyzeArithmetic(
                 }
                 const air_tag: Air.Inst.Tag = if (block.float_mode == .Optimized) .mulwrap_optimized else .mulwrap;
                 if (maybe_rhs_val) |rhs_val| {
-                    if (rhs_val.isUndef()) {
+                    if (rhs_val.isUndef(mod)) {
                         return sema.addConstUndef(resolved_type);
                     }
                     if (try rhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
@@ -14880,7 +14882,7 @@ fn analyzeArithmetic(
                         return casted_lhs;
                     }
                     if (maybe_lhs_val) |lhs_val| {
-                        if (lhs_val.isUndef()) {
+                        if (lhs_val.isUndef(mod)) {
                             return sema.addConstUndef(resolved_type);
                         }
                         return sema.addConstant(
@@ -14901,7 +14903,7 @@ fn analyzeArithmetic(
                     else => unreachable,
                 };
                 if (maybe_lhs_val) |lhs_val| {
-                    if (!lhs_val.isUndef()) {
+                    if (!lhs_val.isUndef(mod)) {
                         if (try lhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
                             const zero_val = if (is_vector) b: {
                                 break :b try Value.Tag.repeated.create(sema.arena, scalar_zero);
@@ -14914,7 +14916,7 @@ fn analyzeArithmetic(
                     }
                 }
                 if (maybe_rhs_val) |rhs_val| {
-                    if (rhs_val.isUndef()) {
+                    if (rhs_val.isUndef(mod)) {
                         return sema.addConstUndef(resolved_type);
                     }
                     if (try rhs_val.compareAllWithZeroAdvanced(.eq, sema)) {
@@ -14927,7 +14929,7 @@ fn analyzeArithmetic(
                         return casted_lhs;
                     }
                     if (maybe_lhs_val) |lhs_val| {
-                        if (lhs_val.isUndef()) {
+                        if (lhs_val.isUndef(mod)) {
                             return sema.addConstUndef(resolved_type);
                         }
 
@@ -15045,7 +15047,7 @@ fn analyzePtrArithmetic(
     const runtime_src = rs: {
         if (opt_ptr_val) |ptr_val| {
             if (opt_off_val) |offset_val| {
-                if (ptr_val.isUndef()) return sema.addConstUndef(new_ptr_ty);
+                if (ptr_val.isUndef(mod)) return sema.addConstUndef(new_ptr_ty);
 
                 const offset_int = try sema.usizeCast(block, offset_src, offset_val.toUnsignedInt(mod));
                 if (offset_int == 0) return ptr;
@@ -15308,7 +15310,7 @@ fn zirCmpEq(
         const runtime_src: LazySrcLoc = src: {
             if (try sema.resolveMaybeUndefVal(lhs)) |lval| {
                 if (try sema.resolveMaybeUndefVal(rhs)) |rval| {
-                    if (lval.isUndef() or rval.isUndef()) {
+                    if (lval.isUndef(mod) or rval.isUndef(mod)) {
                         return sema.addConstUndef(Type.bool);
                     }
                     // TODO optimisation opportunity: evaluate if mem.eql is faster with the names,
@@ -15370,7 +15372,7 @@ fn analyzeCmpUnionTag(
     const coerced_union = try sema.coerce(block, union_tag_ty, un, un_src);
 
     if (try sema.resolveMaybeUndefVal(coerced_tag)) |enum_val| {
-        if (enum_val.isUndef()) return sema.addConstUndef(Type.bool);
+        if (enum_val.isUndef(mod)) return sema.addConstUndef(Type.bool);
         const field_ty = union_ty.unionFieldType(enum_val, sema.mod);
         if (field_ty.zigTypeTag(mod) == .NoReturn) {
             return Air.Inst.Ref.bool_false;
@@ -15472,9 +15474,9 @@ fn cmpSelf(
     const resolved_type = sema.typeOf(casted_lhs);
     const runtime_src: LazySrcLoc = src: {
         if (try sema.resolveMaybeUndefVal(casted_lhs)) |lhs_val| {
-            if (lhs_val.isUndef()) return sema.addConstUndef(Type.bool);
+            if (lhs_val.isUndef(mod)) return sema.addConstUndef(Type.bool);
             if (try sema.resolveMaybeUndefVal(casted_rhs)) |rhs_val| {
-                if (rhs_val.isUndef()) return sema.addConstUndef(Type.bool);
+                if (rhs_val.isUndef(mod)) return sema.addConstUndef(Type.bool);
 
                 if (resolved_type.zigTypeTag(mod) == .Vector) {
                     const result_ty = try mod.vectorType(.{
@@ -15502,7 +15504,7 @@ fn cmpSelf(
             // bool eq/neq more efficiently.
             if (resolved_type.zigTypeTag(mod) == .Bool) {
                 if (try sema.resolveMaybeUndefVal(casted_rhs)) |rhs_val| {
-                    if (rhs_val.isUndef()) return sema.addConstUndef(Type.bool);
+                    if (rhs_val.isUndef(mod)) return sema.addConstUndef(Type.bool);
                     return sema.runtimeBoolCmp(block, src, op, casted_lhs, rhs_val.toBool(mod), lhs_src);
                 }
             }
@@ -15837,68 +15839,69 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
     const src = inst_data.src();
     const ty = try sema.resolveType(block, src, inst_data.operand);
     const type_info_ty = try sema.getBuiltinType("Type");
+    const type_info_tag_ty = type_info_ty.unionTagType(mod).?;
 
     switch (ty.zigTypeTag(mod)) {
         .Type => return sema.addConstant(
             type_info_ty,
             try Value.Tag.@"union".create(sema.arena, .{
-                .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Type)),
+                .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Type)),
                 .val = Value.void,
             }),
         ),
         .Void => return sema.addConstant(
             type_info_ty,
             try Value.Tag.@"union".create(sema.arena, .{
-                .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Void)),
+                .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Void)),
                 .val = Value.void,
             }),
         ),
         .Bool => return sema.addConstant(
             type_info_ty,
             try Value.Tag.@"union".create(sema.arena, .{
-                .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Bool)),
+                .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Bool)),
                 .val = Value.void,
             }),
         ),
         .NoReturn => return sema.addConstant(
             type_info_ty,
             try Value.Tag.@"union".create(sema.arena, .{
-                .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.NoReturn)),
+                .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.NoReturn)),
                 .val = Value.void,
             }),
         ),
         .ComptimeFloat => return sema.addConstant(
             type_info_ty,
             try Value.Tag.@"union".create(sema.arena, .{
-                .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.ComptimeFloat)),
+                .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.ComptimeFloat)),
                 .val = Value.void,
             }),
         ),
         .ComptimeInt => return sema.addConstant(
             type_info_ty,
             try Value.Tag.@"union".create(sema.arena, .{
-                .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.ComptimeInt)),
+                .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.ComptimeInt)),
                 .val = Value.void,
             }),
         ),
         .Undefined => return sema.addConstant(
             type_info_ty,
             try Value.Tag.@"union".create(sema.arena, .{
-                .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Undefined)),
+                .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Undefined)),
                 .val = Value.void,
             }),
         ),
         .Null => return sema.addConstant(
             type_info_ty,
             try Value.Tag.@"union".create(sema.arena, .{
-                .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Null)),
+                .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Null)),
                 .val = Value.void,
             }),
         ),
         .EnumLiteral => return sema.addConstant(
             type_info_ty,
             try Value.Tag.@"union".create(sema.arena, .{
-                .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.EnumLiteral)),
+                .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.EnumLiteral)),
                 .val = Value.void,
             }),
         ),
@@ -15985,10 +15988,12 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             else
                 Value.null;
 
+            const callconv_ty = try sema.getBuiltinType("CallingConvention");
+
             const field_values = try sema.arena.create([6]Value);
             field_values.* = .{
                 // calling_convention: CallingConvention,
-                try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(info.cc)),
+                try mod.enumValueFieldIndex(callconv_ty, @enumToInt(info.cc)),
                 // alignment: comptime_int,
                 try mod.intValue(Type.comptime_int, ty.abiAlignment(mod)),
                 // is_generic: bool,
@@ -16004,26 +16009,24 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             return sema.addConstant(
                 type_info_ty,
                 try Value.Tag.@"union".create(sema.arena, .{
-                    .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Fn)),
+                    .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Fn)),
                     .val = try Value.Tag.aggregate.create(sema.arena, field_values),
                 }),
             );
         },
         .Int => {
+            const signedness_ty = try sema.getBuiltinType("Signedness");
             const info = ty.intInfo(mod);
             const field_values = try sema.arena.alloc(Value, 2);
             // signedness: Signedness,
-            field_values[0] = try Value.Tag.enum_field_index.create(
-                sema.arena,
-                @enumToInt(info.signedness),
-            );
+            field_values[0] = try mod.enumValueFieldIndex(signedness_ty, @enumToInt(info.signedness));
             // bits: u16,
             field_values[1] = try mod.intValue(Type.u16, info.bits);
 
             return sema.addConstant(
                 type_info_ty,
                 try Value.Tag.@"union".create(sema.arena, .{
-                    .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Int)),
+                    .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Int)),
                     .val = try Value.Tag.aggregate.create(sema.arena, field_values),
                 }),
             );
@@ -16036,7 +16039,7 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             return sema.addConstant(
                 type_info_ty,
                 try Value.Tag.@"union".create(sema.arena, .{
-                    .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Float)),
+                    .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Float)),
                     .val = try Value.Tag.aggregate.create(sema.arena, field_values),
                 }),
             );
@@ -16048,10 +16051,13 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             else
                 try info.pointee_type.lazyAbiAlignment(mod, sema.arena);
 
+            const addrspace_ty = try sema.getBuiltinType("AddressSpace");
+            const ptr_size_ty = try sema.getBuiltinType("PtrSize");
+
             const field_values = try sema.arena.create([8]Value);
             field_values.* = .{
                 // size: Size,
-                try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(info.size)),
+                try mod.enumValueFieldIndex(ptr_size_ty, @enumToInt(info.size)),
                 // is_const: bool,
                 Value.makeBool(!info.mutable),
                 // is_volatile: bool,
@@ -16059,7 +16065,7 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
                 // alignment: comptime_int,
                 alignment,
                 // address_space: AddressSpace
-                try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(info.@"addrspace")),
+                try mod.enumValueFieldIndex(addrspace_ty, @enumToInt(info.@"addrspace")),
                 // child: type,
                 try Value.Tag.ty.create(sema.arena, info.pointee_type),
                 // is_allowzero: bool,
@@ -16071,7 +16077,7 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             return sema.addConstant(
                 type_info_ty,
                 try Value.Tag.@"union".create(sema.arena, .{
-                    .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Pointer)),
+                    .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Pointer)),
                     .val = try Value.Tag.aggregate.create(sema.arena, field_values),
                 }),
             );
@@ -16089,7 +16095,7 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             return sema.addConstant(
                 type_info_ty,
                 try Value.Tag.@"union".create(sema.arena, .{
-                    .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Array)),
+                    .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Array)),
                     .val = try Value.Tag.aggregate.create(sema.arena, field_values),
                 }),
             );
@@ -16105,7 +16111,7 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             return sema.addConstant(
                 type_info_ty,
                 try Value.Tag.@"union".create(sema.arena, .{
-                    .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Vector)),
+                    .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Vector)),
                     .val = try Value.Tag.aggregate.create(sema.arena, field_values),
                 }),
             );
@@ -16118,7 +16124,7 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             return sema.addConstant(
                 type_info_ty,
                 try Value.Tag.@"union".create(sema.arena, .{
-                    .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Optional)),
+                    .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Optional)),
                     .val = try Value.Tag.aggregate.create(sema.arena, field_values),
                 }),
             );
@@ -16208,7 +16214,7 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             return sema.addConstant(
                 type_info_ty,
                 try Value.Tag.@"union".create(sema.arena, .{
-                    .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.ErrorSet)),
+                    .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.ErrorSet)),
                     .val = errors_val,
                 }),
             );
@@ -16223,7 +16229,7 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             return sema.addConstant(
                 type_info_ty,
                 try Value.Tag.@"union".create(sema.arena, .{
-                    .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.ErrorUnion)),
+                    .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.ErrorUnion)),
                     .val = try Value.Tag.aggregate.create(sema.arena, field_values),
                 }),
             );
@@ -16310,7 +16316,7 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             return sema.addConstant(
                 type_info_ty,
                 try Value.Tag.@"union".create(sema.arena, .{
-                    .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Enum)),
+                    .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Enum)),
                     .val = try Value.Tag.aggregate.create(sema.arena, field_values),
                 }),
             );
@@ -16399,13 +16405,12 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
                 break :v try Value.Tag.opt_payload.create(sema.arena, ty_val);
             } else Value.null;
 
+            const container_layout_ty = try sema.getBuiltinType("TmpContainerLayoutAlias");
+
             const field_values = try sema.arena.create([4]Value);
             field_values.* = .{
                 // layout: ContainerLayout,
-                try Value.Tag.enum_field_index.create(
-                    sema.arena,
-                    @enumToInt(layout),
-                ),
+                try mod.enumValueFieldIndex(container_layout_ty, @enumToInt(layout)),
 
                 // tag_type: ?type,
                 enum_tag_ty_val,
@@ -16418,7 +16423,7 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             return sema.addConstant(
                 type_info_ty,
                 try Value.Tag.@"union".create(sema.arena, .{
-                    .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Union)),
+                    .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Union)),
                     .val = try Value.Tag.aggregate.create(sema.arena, field_values),
                 }),
             );
@@ -16570,13 +16575,12 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
                 }
             };
 
+            const container_layout_ty = try sema.getBuiltinType("TmpContainerLayoutAlias");
+
             const field_values = try sema.arena.create([5]Value);
             field_values.* = .{
                 // layout: ContainerLayout,
-                try Value.Tag.enum_field_index.create(
-                    sema.arena,
-                    @enumToInt(layout),
-                ),
+                try mod.enumValueFieldIndex(container_layout_ty, @enumToInt(layout)),
                 // backing_integer: ?type,
                 backing_integer_val,
                 // fields: []const StructField,
@@ -16590,7 +16594,7 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             return sema.addConstant(
                 type_info_ty,
                 try Value.Tag.@"union".create(sema.arena, .{
-                    .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Struct)),
+                    .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Struct)),
                     .val = try Value.Tag.aggregate.create(sema.arena, field_values),
                 }),
             );
@@ -16610,7 +16614,7 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             return sema.addConstant(
                 type_info_ty,
                 try Value.Tag.@"union".create(sema.arena, .{
-                    .tag = try Value.Tag.enum_field_index.create(sema.arena, @enumToInt(std.builtin.TypeId.Opaque)),
+                    .tag = try mod.enumValueFieldIndex(type_info_tag_ty, @enumToInt(std.builtin.TypeId.Opaque)),
                     .val = try Value.Tag.aggregate.create(sema.arena, field_values),
                 }),
             );
@@ -16857,7 +16861,7 @@ fn zirBoolNot(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air
 
     const operand = try sema.coerce(block, Type.bool, uncasted_operand, operand_src);
     if (try sema.resolveMaybeUndefVal(operand)) |val| {
-        return if (val.isUndef())
+        return if (val.isUndef(mod))
             sema.addConstUndef(Type.bool)
         else if (val.toBool(mod))
             Air.Inst.Ref.bool_false
@@ -17824,7 +17828,7 @@ fn unionInit(
     if (try sema.resolveMaybeUndefVal(init)) |init_val| {
         const tag_ty = union_ty.unionTagTypeHypothetical(mod);
         const enum_field_index = @intCast(u32, tag_ty.enumFieldIndex(field_name, mod).?);
-        const tag_val = try Value.Tag.enum_field_index.create(sema.arena, enum_field_index);
+        const tag_val = try mod.enumValueFieldIndex(tag_ty, enum_field_index);
         return sema.addConstant(union_ty, try Value.Tag.@"union".create(sema.arena, .{
             .tag = tag_val,
             .val = init_val,
@@ -17925,7 +17929,7 @@ fn zirStructInit(
         const field_index = try sema.unionFieldIndex(block, resolved_ty, field_name, field_src);
         const tag_ty = resolved_ty.unionTagTypeHypothetical(mod);
         const enum_field_index = @intCast(u32, tag_ty.enumFieldIndex(field_name, mod).?);
-        const tag_val = try Value.Tag.enum_field_index.create(sema.arena, enum_field_index);
+        const tag_val = try mod.enumValueFieldIndex(tag_ty, enum_field_index);
 
         const init_inst = try sema.resolveInst(item.data.init);
         if (try sema.resolveMaybeUndefVal(init_inst)) |val| {
@@ -18549,7 +18553,7 @@ fn zirBoolToInt(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
     const inst_data = sema.code.instructions.items(.data)[inst].un_node;
     const operand = try sema.resolveInst(inst_data.operand);
     if (try sema.resolveMaybeUndefVal(operand)) |val| {
-        if (val.isUndef()) return sema.addConstUndef(Type.u1);
+        if (val.isUndef(mod)) return sema.addConstUndef(Type.u1);
         const bool_ints = [2]Air.Inst.Ref{ .zero, .one };
         return bool_ints[@boolToInt(val.toBool(mod))];
     }
@@ -18608,7 +18612,7 @@ fn zirUnaryMath(
                 .child = scalar_ty.ip_index,
             });
             if (try sema.resolveMaybeUndefVal(operand)) |val| {
-                if (val.isUndef())
+                if (val.isUndef(mod))
                     return sema.addConstUndef(result_ty);
 
                 const elems = try sema.arena.alloc(Value, vec_len);
@@ -18627,7 +18631,7 @@ fn zirUnaryMath(
         },
         .ComptimeFloat, .Float => {
             if (try sema.resolveMaybeUndefVal(operand)) |operand_val| {
-                if (operand_val.isUndef())
+                if (operand_val.isUndef(mod))
                     return sema.addConstUndef(operand_ty);
                 const result_val = try eval(operand_val, operand_ty, sema.arena, sema.mod);
                 return sema.addConstant(operand_ty, result_val);
@@ -18744,7 +18748,7 @@ fn zirReify(
             const signedness_val = struct_val[0];
             const bits_val = struct_val[1];
 
-            const signedness = signedness_val.toEnum(std.builtin.Signedness);
+            const signedness = mod.toEnum(std.builtin.Signedness, signedness_val);
             const bits = @intCast(u16, bits_val.toUnsignedInt(mod));
             const ty = try mod.intType(signedness, bits);
             return sema.addType(ty);
@@ -18809,7 +18813,7 @@ fn zirReify(
                 break :t elem_ty;
             };
 
-            const ptr_size = size_val.toEnum(std.builtin.Type.Pointer.Size);
+            const ptr_size = mod.toEnum(std.builtin.Type.Pointer.Size, size_val);
 
             var actual_sentinel: ?Value = null;
             if (!sentinel_val.isNull(mod)) {
@@ -18862,7 +18866,7 @@ fn zirReify(
                 .mutable = !is_const_val.toBool(mod),
                 .@"volatile" = is_volatile_val.toBool(mod),
                 .@"align" = abi_align,
-                .@"addrspace" = address_space_val.toEnum(std.builtin.AddressSpace),
+                .@"addrspace" = mod.toEnum(std.builtin.AddressSpace, address_space_val),
                 .pointee_type = try elem_ty.copy(sema.arena),
                 .@"allowzero" = is_allowzero_val.toBool(mod),
                 .sentinel = actual_sentinel,
@@ -18968,7 +18972,7 @@ fn zirReify(
             const is_tuple_val = struct_val[4];
             assert(struct_val.len == 5);
 
-            const layout = layout_val.toEnum(std.builtin.Type.ContainerLayout);
+            const layout = mod.toEnum(std.builtin.Type.ContainerLayout, layout_val);
 
             // Decls
             if (decls_val.sliceLen(mod) > 0) {
@@ -19143,7 +19147,7 @@ fn zirReify(
             if (decls_val.sliceLen(mod) > 0) {
                 return sema.fail(block, src, "reified unions must have no decls", .{});
             }
-            const layout = layout_val.toEnum(std.builtin.Type.ContainerLayout);
+            const layout = mod.toEnum(std.builtin.Type.ContainerLayout, layout_val);
 
             var new_decl_arena = std.heap.ArenaAllocator.init(gpa);
             errdefer new_decl_arena.deinit();
@@ -19244,7 +19248,7 @@ fn zirReify(
                 }
 
                 if (explicit_enum_info) |tag_info| {
-                    const enum_index = tag_info.nameIndex(mod.intern_pool, field_name_ip) orelse {
+                    const enum_index = tag_info.nameIndex(&mod.intern_pool, field_name_ip) orelse {
                         const msg = msg: {
                             const msg = try sema.errMsg(block, src, "no field named '{s}' in enum '{}'", .{ field_name, union_obj.tag_ty.fmt(mod) });
                             errdefer msg.destroy(gpa);
@@ -19337,7 +19341,7 @@ fn zirReify(
             const struct_val: []const Value = union_val.val.castTag(.aggregate).?.data;
             // TODO use reflection instead of magic numbers here
             // calling_convention: CallingConvention,
-            const cc = struct_val[0].toEnum(std.builtin.CallingConvention);
+            const cc = mod.toEnum(std.builtin.CallingConvention, struct_val[0]);
             // alignment: comptime_int,
             const alignment_val = struct_val[1];
             // is_generic: bool,
@@ -20105,7 +20109,7 @@ fn zirPtrCast(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air
     }
 
     if (try sema.resolveMaybeUndefVal(ptr)) |operand_val| {
-        if (!dest_ty.ptrAllowsZero(mod) and operand_val.isUndef()) {
+        if (!dest_ty.ptrAllowsZero(mod) and operand_val.isUndef(mod)) {
             return sema.failWithUseOfUndef(block, operand_src);
         }
         if (!dest_ty.ptrAllowsZero(mod) and operand_val.isNull(mod)) {
@@ -20240,7 +20244,7 @@ fn zirTruncate(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
     }
 
     if (try sema.resolveMaybeUndefValIntable(operand)) |val| {
-        if (val.isUndef()) return sema.addConstUndef(dest_ty);
+        if (val.isUndef(mod)) return sema.addConstUndef(dest_ty);
         if (!is_vector) {
             return sema.addConstant(
                 dest_ty,
@@ -20344,7 +20348,7 @@ fn zirBitCount(
                 .child = result_scalar_ty.ip_index,
             });
             if (try sema.resolveMaybeUndefVal(operand)) |val| {
-                if (val.isUndef()) return sema.addConstUndef(result_ty);
+                if (val.isUndef(mod)) return sema.addConstUndef(result_ty);
 
                 const elems = try sema.arena.alloc(Value, vec_len);
                 const scalar_ty = operand_ty.scalarType(mod);
@@ -20364,7 +20368,7 @@ fn zirBitCount(
         },
         .Int => {
             if (try sema.resolveMaybeUndefVal(operand)) |val| {
-                if (val.isUndef()) return sema.addConstUndef(result_scalar_ty);
+                if (val.isUndef(mod)) return sema.addConstUndef(result_scalar_ty);
                 try sema.resolveLazyValue(val);
                 return sema.addIntUnsigned(result_scalar_ty, comptimeOp(val, operand_ty, mod));
             } else {
@@ -20401,7 +20405,7 @@ fn zirByteSwap(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
     switch (operand_ty.zigTypeTag(mod)) {
         .Int => {
             const runtime_src = if (try sema.resolveMaybeUndefVal(operand)) |val| {
-                if (val.isUndef()) return sema.addConstUndef(operand_ty);
+                if (val.isUndef(mod)) return sema.addConstUndef(operand_ty);
                 const result_val = try val.byteSwap(operand_ty, mod, sema.arena);
                 return sema.addConstant(operand_ty, result_val);
             } else operand_src;
@@ -20411,7 +20415,7 @@ fn zirByteSwap(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
         },
         .Vector => {
             const runtime_src = if (try sema.resolveMaybeUndefVal(operand)) |val| {
-                if (val.isUndef())
+                if (val.isUndef(mod))
                     return sema.addConstUndef(operand_ty);
 
                 const vec_len = operand_ty.vectorLen(mod);
@@ -20449,7 +20453,7 @@ fn zirBitReverse(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!
     switch (operand_ty.zigTypeTag(mod)) {
         .Int => {
             const runtime_src = if (try sema.resolveMaybeUndefVal(operand)) |val| {
-                if (val.isUndef()) return sema.addConstUndef(operand_ty);
+                if (val.isUndef(mod)) return sema.addConstUndef(operand_ty);
                 const result_val = try val.bitReverse(operand_ty, mod, sema.arena);
                 return sema.addConstant(operand_ty, result_val);
             } else operand_src;
@@ -20459,7 +20463,7 @@ fn zirBitReverse(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!
         },
         .Vector => {
             const runtime_src = if (try sema.resolveMaybeUndefVal(operand)) |val| {
-                if (val.isUndef())
+                if (val.isUndef(mod))
                     return sema.addConstUndef(operand_ty);
 
                 const vec_len = operand_ty.vectorLen(mod);
@@ -20997,7 +21001,7 @@ fn resolveExportOptions(
 
     const linkage_operand = try sema.fieldVal(block, src, options, "linkage", linkage_src);
     const linkage_val = try sema.resolveConstValue(block, linkage_src, linkage_operand, "linkage of exported value must be comptime-known");
-    const linkage = linkage_val.toEnum(std.builtin.GlobalLinkage);
+    const linkage = mod.toEnum(std.builtin.GlobalLinkage, linkage_val);
 
     const section_operand = try sema.fieldVal(block, src, options, "section", section_src);
     const section_opt_val = try sema.resolveConstValue(block, section_src, section_operand, "linksection of exported value must be comptime-known");
@@ -21009,7 +21013,7 @@ fn resolveExportOptions(
 
     const visibility_operand = try sema.fieldVal(block, src, options, "visibility", visibility_src);
     const visibility_val = try sema.resolveConstValue(block, visibility_src, visibility_operand, "visibility of exported value must be comptime-known");
-    const visibility = visibility_val.toEnum(std.builtin.SymbolVisibility);
+    const visibility = mod.toEnum(std.builtin.SymbolVisibility, visibility_val);
 
     if (name.len < 1) {
         return sema.fail(block, name_src, "exported symbol name cannot be empty", .{});
@@ -21037,11 +21041,12 @@ fn resolveBuiltinEnum(
     comptime name: []const u8,
     reason: []const u8,
 ) CompileError!@field(std.builtin, name) {
+    const mod = sema.mod;
     const ty = try sema.getBuiltinType(name);
     const air_ref = try sema.resolveInst(zir_ref);
     const coerced = try sema.coerce(block, ty, air_ref, src);
     const val = try sema.resolveConstValue(block, src, coerced, reason);
-    return val.toEnum(@field(std.builtin, name));
+    return mod.toEnum(@field(std.builtin, name), val);
 }
 
 fn resolveAtomicOrder(
@@ -21123,7 +21128,7 @@ fn zirCmpxchg(
     const runtime_src = if (try sema.resolveDefinedValue(block, ptr_src, ptr)) |ptr_val| rs: {
         if (try sema.resolveMaybeUndefVal(expected_value)) |expected_val| {
             if (try sema.resolveMaybeUndefVal(new_value)) |new_val| {
-                if (expected_val.isUndef() or new_val.isUndef()) {
+                if (expected_val.isUndef(mod) or new_val.isUndef(mod)) {
                     // TODO: this should probably cause the memory stored at the pointer
                     // to become undef as well
                     return sema.addConstUndef(result_ty);
@@ -21173,7 +21178,7 @@ fn zirSplat(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.I
         .child = scalar_ty.ip_index,
     });
     if (try sema.resolveMaybeUndefVal(scalar)) |scalar_val| {
-        if (scalar_val.isUndef()) return sema.addConstUndef(vector_ty);
+        if (scalar_val.isUndef(mod)) return sema.addConstUndef(vector_ty);
 
         return sema.addConstant(
             vector_ty,
@@ -21225,7 +21230,7 @@ fn zirReduce(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
     }
 
     if (try sema.resolveMaybeUndefVal(operand)) |operand_val| {
-        if (operand_val.isUndef()) return sema.addConstUndef(scalar_ty);
+        if (operand_val.isUndef(mod)) return sema.addConstUndef(scalar_ty);
 
         var accum: Value = try operand_val.elemValue(mod, 0);
         var i: u32 = 1;
@@ -21345,7 +21350,7 @@ fn analyzeShuffle(
     var i: usize = 0;
     while (i < mask_len) : (i += 1) {
         const elem = try mask.elemValue(sema.mod, i);
-        if (elem.isUndef()) continue;
+        if (elem.isUndef(mod)) continue;
         const int = elem.toSignedInt(mod);
         var unsigned: u32 = undefined;
         var chosen: u32 = undefined;
@@ -21383,7 +21388,7 @@ fn analyzeShuffle(
             i = 0;
             while (i < mask_len) : (i += 1) {
                 const mask_elem_val = try mask.elemValue(sema.mod, i);
-                if (mask_elem_val.isUndef()) {
+                if (mask_elem_val.isUndef(mod)) {
                     values[i] = Value.undef;
                     continue;
                 }
@@ -21484,13 +21489,13 @@ fn zirSelect(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstData) C
     const maybe_b = try sema.resolveMaybeUndefVal(b);
 
     const runtime_src = if (maybe_pred) |pred_val| rs: {
-        if (pred_val.isUndef()) return sema.addConstUndef(vec_ty);
+        if (pred_val.isUndef(mod)) return sema.addConstUndef(vec_ty);
 
         if (maybe_a) |a_val| {
-            if (a_val.isUndef()) return sema.addConstUndef(vec_ty);
+            if (a_val.isUndef(mod)) return sema.addConstUndef(vec_ty);
 
             if (maybe_b) |b_val| {
-                if (b_val.isUndef()) return sema.addConstUndef(vec_ty);
+                if (b_val.isUndef(mod)) return sema.addConstUndef(vec_ty);
 
                 const elems = try sema.gpa.alloc(Value, vec_len);
                 for (elems, 0..) |*elem, i| {
@@ -21512,16 +21517,16 @@ fn zirSelect(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstData) C
             }
         } else {
             if (maybe_b) |b_val| {
-                if (b_val.isUndef()) return sema.addConstUndef(vec_ty);
+                if (b_val.isUndef(mod)) return sema.addConstUndef(vec_ty);
             }
             break :rs a_src;
         }
     } else rs: {
         if (maybe_a) |a_val| {
-            if (a_val.isUndef()) return sema.addConstUndef(vec_ty);
+            if (a_val.isUndef(mod)) return sema.addConstUndef(vec_ty);
         }
         if (maybe_b) |b_val| {
-            if (b_val.isUndef()) return sema.addConstUndef(vec_ty);
+            if (b_val.isUndef(mod)) return sema.addConstUndef(vec_ty);
         }
         break :rs pred_src;
     };
@@ -21728,10 +21733,10 @@ fn zirMulAdd(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
 
     const runtime_src = if (maybe_mulend1) |mulend1_val| rs: {
         if (maybe_mulend2) |mulend2_val| {
-            if (mulend2_val.isUndef()) return sema.addConstUndef(ty);
+            if (mulend2_val.isUndef(mod)) return sema.addConstUndef(ty);
 
             if (maybe_addend) |addend_val| {
-                if (addend_val.isUndef()) return sema.addConstUndef(ty);
+                if (addend_val.isUndef(mod)) return sema.addConstUndef(ty);
                 const result_val = try Value.mulAdd(ty, mulend1_val, mulend2_val, addend_val, sema.arena, sema.mod);
                 return sema.addConstant(ty, result_val);
             } else {
@@ -21739,16 +21744,16 @@ fn zirMulAdd(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
             }
         } else {
             if (maybe_addend) |addend_val| {
-                if (addend_val.isUndef()) return sema.addConstUndef(ty);
+                if (addend_val.isUndef(mod)) return sema.addConstUndef(ty);
             }
             break :rs mulend2_src;
         }
     } else rs: {
         if (maybe_mulend2) |mulend2_val| {
-            if (mulend2_val.isUndef()) return sema.addConstUndef(ty);
+            if (mulend2_val.isUndef(mod)) return sema.addConstUndef(ty);
         }
         if (maybe_addend) |addend_val| {
-            if (addend_val.isUndef()) return sema.addConstUndef(ty);
+            if (addend_val.isUndef(mod)) return sema.addConstUndef(ty);
         }
         break :rs mulend1_src;
     };
@@ -21784,7 +21789,7 @@ fn zirBuiltinCall(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError
     const air_ref = try sema.resolveInst(extra.modifier);
     const modifier_ref = try sema.coerce(block, modifier_ty, air_ref, modifier_src);
     const modifier_val = try sema.resolveConstValue(block, modifier_src, modifier_ref, "call modifier must be comptime-known");
-    var modifier = modifier_val.toEnum(std.builtin.CallModifier);
+    var modifier = mod.toEnum(std.builtin.CallModifier, modifier_val);
     switch (modifier) {
         // These can be upgraded to comptime or nosuspend calls.
         .auto, .never_tail, .no_async => {
@@ -22050,8 +22055,8 @@ fn analyzeMinMax(
 
             runtime_known.unset(operand_idx);
 
-            if (cur_val.isUndef()) continue; // result is also undef
-            if (operand_val.isUndef()) {
+            if (cur_val.isUndef(mod)) continue; // result is also undef
+            if (operand_val.isUndef(mod)) {
                 cur_minmax = try sema.addConstUndef(simd_op.result_ty);
                 continue;
             }
@@ -22096,7 +22101,7 @@ fn analyzeMinMax(
             var cur_max: Value = cur_min;
             for (1..len) |idx| {
                 const elem_val = try val.elemValue(mod, idx);
-                if (elem_val.isUndef()) break :blk orig_ty; // can't refine undef
+                if (elem_val.isUndef(mod)) break :blk orig_ty; // can't refine undef
                 if (Value.order(elem_val, cur_min, mod).compare(.lt)) cur_min = elem_val;
                 if (Value.order(elem_val, cur_max, mod).compare(.gt)) cur_max = elem_val;
             }
@@ -22108,7 +22113,7 @@ fn analyzeMinMax(
             });
         } else blk: {
             if (orig_ty.isAnyFloat()) break :blk orig_ty; // can't refine floats
-            if (val.isUndef()) break :blk orig_ty; // can't refine undef
+            if (val.isUndef(mod)) break :blk orig_ty; // can't refine undef
             break :blk try mod.intFittingRange(val, val);
         };
 
@@ -22136,7 +22141,7 @@ fn analyzeMinMax(
     // If the comptime-known part is undef we can avoid emitting actual instructions later
     const known_undef = if (cur_minmax) |operand| blk: {
         const val = (try sema.resolveMaybeUndefVal(operand)).?;
-        break :blk val.isUndef();
+        break :blk val.isUndef(mod);
     } else false;
 
     if (cur_minmax == null) {
@@ -22676,7 +22681,7 @@ fn zirFuncFancy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
         if (val.isGenericPoison()) {
             break :blk null;
         }
-        break :blk val.toEnum(std.builtin.AddressSpace);
+        break :blk mod.toEnum(std.builtin.AddressSpace, val);
     } else if (extra.data.bits.has_addrspace_ref) blk: {
         const addrspace_ref = @intToEnum(Zir.Inst.Ref, sema.code.extra[extra_index]);
         extra_index += 1;
@@ -22686,7 +22691,7 @@ fn zirFuncFancy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
             },
             else => |e| return e,
         };
-        break :blk addrspace_tv.val.toEnum(std.builtin.AddressSpace);
+        break :blk mod.toEnum(std.builtin.AddressSpace, addrspace_tv.val);
     } else target_util.defaultAddressSpace(target, .function);
 
     const @"linksection": FuncLinkSection = if (extra.data.bits.has_section_body) blk: {
@@ -22724,7 +22729,7 @@ fn zirFuncFancy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
         if (val.isGenericPoison()) {
             break :blk null;
         }
-        break :blk val.toEnum(std.builtin.CallingConvention);
+        break :blk mod.toEnum(std.builtin.CallingConvention, val);
     } else if (extra.data.bits.has_cc_ref) blk: {
         const cc_ref = @intToEnum(Zir.Inst.Ref, sema.code.extra[extra_index]);
         extra_index += 1;
@@ -22734,7 +22739,7 @@ fn zirFuncFancy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
             },
             else => |e| return e,
         };
-        break :blk cc_tv.val.toEnum(std.builtin.CallingConvention);
+        break :blk mod.toEnum(std.builtin.CallingConvention, cc_tv.val);
     } else if (sema.owner_decl.is_exported and has_body)
         .C
     else
@@ -22921,9 +22926,9 @@ fn resolvePrefetchOptions(
     const cache_val = try sema.resolveConstValue(block, cache_src, cache, "prefetch cache must be comptime-known");
 
     return std.builtin.PrefetchOptions{
-        .rw = rw_val.toEnum(std.builtin.PrefetchOptions.Rw),
+        .rw = mod.toEnum(std.builtin.PrefetchOptions.Rw, rw_val),
         .locality = @intCast(u2, locality_val.toUnsignedInt(mod)),
-        .cache = cache_val.toEnum(std.builtin.PrefetchOptions.Cache),
+        .cache = mod.toEnum(std.builtin.PrefetchOptions.Cache, cache_val),
     };
 }
 
@@ -22986,7 +22991,7 @@ fn resolveExternOptions(
 
     const linkage_ref = try sema.fieldVal(block, src, options, "linkage", linkage_src);
     const linkage_val = try sema.resolveConstValue(block, linkage_src, linkage_ref, "linkage of the extern symbol must be comptime-known");
-    const linkage = linkage_val.toEnum(std.builtin.GlobalLinkage);
+    const linkage = mod.toEnum(std.builtin.GlobalLinkage, linkage_val);
 
     const is_thread_local = try sema.fieldVal(block, src, options, "is_thread_local", thread_local_src);
     const is_thread_local_val = try sema.resolveConstValue(block, thread_local_src, is_thread_local, "threadlocality of the extern symbol must be comptime-known");
@@ -24052,7 +24057,7 @@ fn fieldVal(
                             const field_index = @intCast(u32, field_index_usize);
                             return sema.addConstant(
                                 enum_ty,
-                                try Value.Tag.enum_field_index.create(sema.arena, field_index),
+                                try mod.enumValueFieldIndex(enum_ty, field_index),
                             );
                         }
                     }
@@ -24067,8 +24072,8 @@ fn fieldVal(
                     const field_index_usize = child_type.enumFieldIndex(field_name, mod) orelse
                         return sema.failWithBadMemberAccess(block, child_type, field_name_src, field_name);
                     const field_index = @intCast(u32, field_index_usize);
-                    const enum_val = try Value.Tag.enum_field_index.create(arena, field_index);
-                    return sema.addConstant(try child_type.copy(arena), enum_val);
+                    const enum_val = try mod.enumValueFieldIndex(child_type, field_index);
+                    return sema.addConstant(child_type, enum_val);
                 },
                 .Struct, .Opaque => {
                     if (child_type.getNamespaceIndex(mod).unwrap()) |namespace| {
@@ -24267,8 +24272,8 @@ fn fieldPtr(
                             var anon_decl = try block.startAnonDecl();
                             defer anon_decl.deinit();
                             return sema.analyzeDeclRef(try anon_decl.finish(
-                                try enum_ty.copy(anon_decl.arena()),
-                                try Value.Tag.enum_field_index.create(anon_decl.arena(), field_index_u32),
+                                enum_ty,
+                                try mod.enumValueFieldIndex(enum_ty, field_index_u32),
                                 0, // default alignment
                             ));
                         }
@@ -24288,8 +24293,8 @@ fn fieldPtr(
                     var anon_decl = try block.startAnonDecl();
                     defer anon_decl.deinit();
                     return sema.analyzeDeclRef(try anon_decl.finish(
-                        try child_type.copy(anon_decl.arena()),
-                        try Value.Tag.enum_field_index.create(anon_decl.arena(), field_index_u32),
+                        child_type,
+                        try mod.enumValueFieldIndex(child_type, field_index_u32),
                         0, // default alignment
                     ));
                 },
@@ -24764,7 +24769,7 @@ fn structFieldVal(
                 }
 
                 if (try sema.resolveMaybeUndefVal(struct_byval)) |struct_val| {
-                    if (struct_val.isUndef()) return sema.addConstUndef(field.ty);
+                    if (struct_val.isUndef(mod)) return sema.addConstUndef(field.ty);
                     if ((try sema.typeHasOnePossibleValue(field.ty))) |opv| {
                         return sema.addConstant(field.ty, opv);
                     }
@@ -24836,7 +24841,7 @@ fn tupleFieldValByIndex(
     }
 
     if (try sema.resolveMaybeUndefVal(tuple_byval)) |tuple_val| {
-        if (tuple_val.isUndef()) return sema.addConstUndef(field_ty);
+        if (tuple_val.isUndef(mod)) return sema.addConstUndef(field_ty);
         if ((try sema.typeHasOnePossibleValue(field_ty))) |opv| {
             return sema.addConstant(field_ty, opv);
         }
@@ -24897,19 +24902,15 @@ fn unionFieldPtr(
             .Auto => if (!initializing) {
                 const union_val = (try sema.pointerDeref(block, src, union_ptr_val, union_ptr_ty)) orelse
                     break :ct;
-                if (union_val.isUndef()) {
+                if (union_val.isUndef(mod)) {
                     return sema.failWithUseOfUndef(block, src);
                 }
                 const tag_and_val = union_val.castTag(.@"union").?.data;
-                var field_tag_buf: Value.Payload.U32 = .{
-                    .base = .{ .tag = .enum_field_index },
-                    .data = enum_field_index,
-                };
-                const field_tag = Value.initPayload(&field_tag_buf.base);
+                const field_tag = try mod.enumValueFieldIndex(union_obj.tag_ty, enum_field_index);
                 const tag_matches = tag_and_val.tag.eql(field_tag, union_obj.tag_ty, mod);
                 if (!tag_matches) {
                     const msg = msg: {
-                        const active_index = tag_and_val.tag.castTag(.enum_field_index).?.data;
+                        const active_index = union_obj.tag_ty.enumTagFieldIndex(tag_and_val.tag, mod).?;
                         const active_field_name = union_obj.tag_ty.enumFieldName(active_index, mod);
                         const msg = try sema.errMsg(block, src, "access of union field '{s}' while field '{s}' is active", .{ field_name, active_field_name });
                         errdefer msg.destroy(sema.gpa);
@@ -24935,7 +24936,7 @@ fn unionFieldPtr(
     if (!initializing and union_obj.layout == .Auto and block.wantSafety() and
         union_ty.unionTagTypeSafety(mod) != null and union_obj.fields.count() > 1)
     {
-        const wanted_tag_val = try Value.Tag.enum_field_index.create(sema.arena, enum_field_index);
+        const wanted_tag_val = try mod.enumValueFieldIndex(union_obj.tag_ty, enum_field_index);
         const wanted_tag = try sema.addConstant(union_obj.tag_ty, wanted_tag_val);
         // TODO would it be better if get_union_tag supported pointers to unions?
         const union_val = try block.addTyOp(.load, union_ty, union_ptr);
@@ -24968,14 +24969,10 @@ fn unionFieldVal(
     const enum_field_index = @intCast(u32, union_obj.tag_ty.enumFieldIndex(field_name, mod).?);
 
     if (try sema.resolveMaybeUndefVal(union_byval)) |union_val| {
-        if (union_val.isUndef()) return sema.addConstUndef(field.ty);
+        if (union_val.isUndef(mod)) return sema.addConstUndef(field.ty);
 
         const tag_and_val = union_val.castTag(.@"union").?.data;
-        var field_tag_buf: Value.Payload.U32 = .{
-            .base = .{ .tag = .enum_field_index },
-            .data = enum_field_index,
-        };
-        const field_tag = Value.initPayload(&field_tag_buf.base);
+        const field_tag = try mod.enumValueFieldIndex(union_obj.tag_ty, enum_field_index);
         const tag_matches = tag_and_val.tag.eql(field_tag, union_obj.tag_ty, mod);
         switch (union_obj.layout) {
             .Auto => {
@@ -24983,7 +24980,7 @@ fn unionFieldVal(
                     return sema.addConstant(field.ty, tag_and_val.val);
                 } else {
                     const msg = msg: {
-                        const active_index = tag_and_val.tag.castTag(.enum_field_index).?.data;
+                        const active_index = union_obj.tag_ty.enumTagFieldIndex(tag_and_val.tag, mod).?;
                         const active_field_name = union_obj.tag_ty.enumFieldName(active_index, mod);
                         const msg = try sema.errMsg(block, src, "access of union field '{s}' while field '{s}' is active", .{ field_name, active_field_name });
                         errdefer msg.destroy(sema.gpa);
@@ -25010,7 +25007,7 @@ fn unionFieldVal(
     if (union_obj.layout == .Auto and block.wantSafety() and
         union_ty.unionTagTypeSafety(mod) != null and union_obj.fields.count() > 1)
     {
-        const wanted_tag_val = try Value.Tag.enum_field_index.create(sema.arena, enum_field_index);
+        const wanted_tag_val = try mod.enumValueFieldIndex(union_obj.tag_ty, enum_field_index);
         const wanted_tag = try sema.addConstant(union_obj.tag_ty, wanted_tag_val);
         const active_tag = try block.addTyOp(.get_union_tag, union_obj.tag_ty, union_byval);
         try sema.panicInactiveUnionField(block, active_tag, wanted_tag);
@@ -25278,7 +25275,7 @@ fn tupleField(
     }
 
     if (try sema.resolveMaybeUndefVal(tuple)) |tuple_val| {
-        if (tuple_val.isUndef()) return sema.addConstUndef(field_ty);
+        if (tuple_val.isUndef(mod)) return sema.addConstUndef(field_ty);
         return sema.addConstant(field_ty, try tuple_val.fieldValue(tuple_ty, mod, field_index));
     }
 
@@ -25326,7 +25323,7 @@ fn elemValArray(
         }
     }
     if (maybe_undef_array_val) |array_val| {
-        if (array_val.isUndef()) {
+        if (array_val.isUndef(mod)) {
             return sema.addConstUndef(elem_ty);
         }
         if (maybe_index_val) |index_val| {
@@ -25387,7 +25384,7 @@ fn elemPtrArray(
     const elem_ptr_ty = try sema.elemPtrType(array_ptr_ty, offset);
 
     if (maybe_undef_array_ptr_val) |array_ptr_val| {
-        if (array_ptr_val.isUndef()) {
+        if (array_ptr_val.isUndef(mod)) {
             return sema.addConstUndef(elem_ptr_ty);
         }
         if (offset) |index| {
@@ -25494,7 +25491,7 @@ fn elemPtrSlice(
     const elem_ptr_ty = try sema.elemPtrType(slice_ty, offset);
 
     if (maybe_undef_slice_val) |slice_val| {
-        if (slice_val.isUndef()) {
+        if (slice_val.isUndef(mod)) {
             return sema.addConstUndef(elem_ptr_ty);
         }
         const slice_len = slice_val.sliceLen(mod);
@@ -25519,7 +25516,7 @@ fn elemPtrSlice(
     if (oob_safety and block.wantSafety()) {
         const len_inst = len: {
             if (maybe_undef_slice_val) |slice_val|
-                if (!slice_val.isUndef())
+                if (!slice_val.isUndef(mod))
                     break :len try sema.addIntUnsigned(Type.usize, slice_val.sliceLen(mod));
             break :len try block.addTyOp(.slice_len, Type.usize, slice);
         };
@@ -25595,7 +25592,6 @@ fn coerceExtra(
     if (dest_ty.eql(inst_ty, mod))
         return inst;
 
-    const arena = sema.arena;
     const maybe_inst_val = try sema.resolveMaybeUndefVal(inst);
 
     var in_memory_result = try sema.coerceInMemoryAllowed(block, dest_ty, inst_ty, false, target, dest_ty_src, inst_src);
@@ -26089,7 +26085,7 @@ fn coerceExtra(
                 };
                 return sema.addConstant(
                     dest_ty,
-                    try Value.Tag.enum_field_index.create(arena, @intCast(u32, field_index)),
+                    try mod.enumValueFieldIndex(dest_ty, @intCast(u32, field_index)),
                 );
             },
             .Union => blk: {
@@ -27772,8 +27768,9 @@ fn beginComptimePtrMutation(
                             },
                             .Union => {
                                 const payload = try arena.create(Value.Payload.Union);
+                                const tag_ty = parent.ty.unionTagTypeHypothetical(mod);
                                 payload.* = .{ .data = .{
-                                    .tag = try Value.Tag.enum_field_index.create(arena, field_index),
+                                    .tag = try mod.enumValueFieldIndex(tag_ty, field_index),
                                     .val = Value.undef,
                                 } };
 
@@ -27848,11 +27845,10 @@ fn beginComptimePtrMutation(
 
                         .@"union" => {
                             // We need to set the active field of the union.
-                            const arena = parent.beginArena(sema.mod);
-                            defer parent.finishArena(sema.mod);
+                            const union_tag_ty = field_ptr.container_ty.unionTagTypeHypothetical(mod);
 
                             const payload = &val_ptr.castTag(.@"union").?.data;
-                            payload.tag = try Value.Tag.enum_field_index.create(arena, field_index);
+                            payload.tag = try mod.enumValueFieldIndex(union_tag_ty, field_index);
 
                             return beginComptimePtrMutationInner(
                                 sema,
@@ -28489,7 +28485,7 @@ fn coerceCompatiblePtrs(
     const mod = sema.mod;
     const inst_ty = sema.typeOf(inst);
     if (try sema.resolveMaybeUndefVal(inst)) |val| {
-        if (!val.isUndef() and val.isNull(mod) and !dest_ty.isAllowzeroPtr(mod)) {
+        if (!val.isUndef(mod) and val.isNull(mod) and !dest_ty.isAllowzeroPtr(mod)) {
             return sema.fail(block, inst_src, "null pointer casted to type '{}'", .{dest_ty.fmt(sema.mod)});
         }
         // The comptime Value representation is compatible with both types.
@@ -29318,7 +29314,7 @@ fn analyzeSlicePtr(
     const buf = try sema.arena.create(Type.SlicePtrFieldTypeBuffer);
     const result_ty = slice_ty.slicePtrFieldType(buf, mod);
     if (try sema.resolveMaybeUndefVal(slice)) |val| {
-        if (val.isUndef()) return sema.addConstUndef(result_ty);
+        if (val.isUndef(mod)) return sema.addConstUndef(result_ty);
         return sema.addConstant(result_ty, val.slicePtr());
     }
     try sema.requireRuntimeBlock(block, slice_src, null);
@@ -29331,8 +29327,9 @@ fn analyzeSliceLen(
     src: LazySrcLoc,
     slice_inst: Air.Inst.Ref,
 ) CompileError!Air.Inst.Ref {
+    const mod = sema.mod;
     if (try sema.resolveMaybeUndefVal(slice_inst)) |slice_val| {
-        if (slice_val.isUndef()) {
+        if (slice_val.isUndef(mod)) {
             return sema.addConstUndef(Type.usize);
         }
         return sema.addIntUnsigned(Type.usize, slice_val.sliceLen(sema.mod));
@@ -29351,7 +29348,7 @@ fn analyzeIsNull(
     const mod = sema.mod;
     const result_ty = Type.bool;
     if (try sema.resolveMaybeUndefVal(operand)) |opt_val| {
-        if (opt_val.isUndef()) {
+        if (opt_val.isUndef(mod)) {
             return sema.addConstUndef(result_ty);
         }
         const is_null = opt_val.isNull(mod);
@@ -29480,7 +29477,7 @@ fn analyzeIsNonErrComptimeOnly(
     }
 
     if (maybe_operand_val) |err_union| {
-        if (err_union.isUndef()) {
+        if (err_union.isUndef(mod)) {
             return sema.addConstUndef(Type.bool);
         }
         if (err_union.getError() == null) {
@@ -29660,7 +29657,7 @@ fn analyzeSlice(
                 } else try sema.coerce(block, Type.usize, uncasted_end_opt, end_src);
                 if (try sema.resolveDefinedValue(block, end_src, end)) |end_val| {
                     if (try sema.resolveMaybeUndefVal(ptr_or_slice)) |slice_val| {
-                        if (slice_val.isUndef()) {
+                        if (slice_val.isUndef(mod)) {
                             return sema.fail(block, src, "slice of undefined", .{});
                         }
                         const has_sentinel = slice_ty.sentinel(mod) != null;
@@ -29838,7 +29835,7 @@ fn analyzeSlice(
             return result;
         };
 
-        if (!new_ptr_val.isUndef()) {
+        if (!new_ptr_val.isUndef(mod)) {
             return sema.addConstant(return_ty, new_ptr_val);
         }
 
@@ -29959,19 +29956,19 @@ fn cmpNumeric(
         if (try sema.resolveMaybeUndefVal(lhs)) |lhs_val| {
             if (try sema.resolveMaybeUndefVal(rhs)) |rhs_val| {
                 // Compare ints: const vs. undefined (or vice versa)
-                if (!lhs_val.isUndef() and (lhs_ty.isInt(mod) or lhs_ty_tag == .ComptimeInt) and rhs_ty.isInt(mod) and rhs_val.isUndef()) {
+                if (!lhs_val.isUndef(mod) and (lhs_ty.isInt(mod) or lhs_ty_tag == .ComptimeInt) and rhs_ty.isInt(mod) and rhs_val.isUndef(mod)) {
                     try sema.resolveLazyValue(lhs_val);
                     if (try sema.compareIntsOnlyPossibleResult(lhs_val, op, rhs_ty)) |res| {
                         return if (res) Air.Inst.Ref.bool_true else Air.Inst.Ref.bool_false;
                     }
-                } else if (!rhs_val.isUndef() and (rhs_ty.isInt(mod) or rhs_ty_tag == .ComptimeInt) and lhs_ty.isInt(mod) and lhs_val.isUndef()) {
+                } else if (!rhs_val.isUndef(mod) and (rhs_ty.isInt(mod) or rhs_ty_tag == .ComptimeInt) and lhs_ty.isInt(mod) and lhs_val.isUndef(mod)) {
                     try sema.resolveLazyValue(rhs_val);
                     if (try sema.compareIntsOnlyPossibleResult(rhs_val, op.reverse(), lhs_ty)) |res| {
                         return if (res) Air.Inst.Ref.bool_true else Air.Inst.Ref.bool_false;
                     }
                 }
 
-                if (lhs_val.isUndef() or rhs_val.isUndef()) {
+                if (lhs_val.isUndef(mod) or rhs_val.isUndef(mod)) {
                     return sema.addConstUndef(Type.bool);
                 }
                 if (lhs_val.isNan(mod) or rhs_val.isNan(mod)) {
@@ -29987,7 +29984,7 @@ fn cmpNumeric(
                     return Air.Inst.Ref.bool_false;
                 }
             } else {
-                if (!lhs_val.isUndef() and (lhs_ty.isInt(mod) or lhs_ty_tag == .ComptimeInt) and rhs_ty.isInt(mod)) {
+                if (!lhs_val.isUndef(mod) and (lhs_ty.isInt(mod) or lhs_ty_tag == .ComptimeInt) and rhs_ty.isInt(mod)) {
                     // Compare ints: const vs. var
                     try sema.resolveLazyValue(lhs_val);
                     if (try sema.compareIntsOnlyPossibleResult(lhs_val, op, rhs_ty)) |res| {
@@ -29998,7 +29995,7 @@ fn cmpNumeric(
             }
         } else {
             if (try sema.resolveMaybeUndefVal(rhs)) |rhs_val| {
-                if (!rhs_val.isUndef() and (rhs_ty.isInt(mod) or rhs_ty_tag == .ComptimeInt) and lhs_ty.isInt(mod)) {
+                if (!rhs_val.isUndef(mod) and (rhs_ty.isInt(mod) or rhs_ty_tag == .ComptimeInt) and lhs_ty.isInt(mod)) {
                     // Compare ints: var vs. const
                     try sema.resolveLazyValue(rhs_val);
                     if (try sema.compareIntsOnlyPossibleResult(rhs_val, op.reverse(), lhs_ty)) |res| {
@@ -30067,7 +30064,7 @@ fn cmpNumeric(
     var lhs_bits: usize = undefined;
     if (try sema.resolveMaybeUndefVal(lhs)) |lhs_val| {
         try sema.resolveLazyValue(lhs_val);
-        if (lhs_val.isUndef())
+        if (lhs_val.isUndef(mod))
             return sema.addConstUndef(Type.bool);
         if (lhs_val.isNan(mod)) switch (op) {
             .neq => return Air.Inst.Ref.bool_true,
@@ -30126,7 +30123,7 @@ fn cmpNumeric(
     var rhs_bits: usize = undefined;
     if (try sema.resolveMaybeUndefVal(rhs)) |rhs_val| {
         try sema.resolveLazyValue(rhs_val);
-        if (rhs_val.isUndef())
+        if (rhs_val.isUndef(mod))
             return sema.addConstUndef(Type.bool);
         if (rhs_val.isNan(mod)) switch (op) {
             .neq => return Air.Inst.Ref.bool_true,
@@ -30327,7 +30324,7 @@ fn cmpVector(
     const runtime_src: LazySrcLoc = src: {
         if (try sema.resolveMaybeUndefVal(lhs)) |lhs_val| {
             if (try sema.resolveMaybeUndefVal(rhs)) |rhs_val| {
-                if (lhs_val.isUndef() or rhs_val.isUndef()) {
+                if (lhs_val.isUndef(mod) or rhs_val.isUndef(mod)) {
                     return sema.addConstUndef(result_ty);
                 }
                 const cmp_val = try sema.compareVector(lhs_val, op, rhs_val, lhs_ty);
@@ -30444,11 +30441,12 @@ fn unionToTag(
     un: Air.Inst.Ref,
     un_src: LazySrcLoc,
 ) !Air.Inst.Ref {
+    const mod = sema.mod;
     if ((try sema.typeHasOnePossibleValue(enum_ty))) |opv| {
         return sema.addConstant(enum_ty, opv);
     }
     if (try sema.resolveMaybeUndefVal(un)) |un_val| {
-        return sema.addConstant(enum_ty, un_val.unionTag());
+        return sema.addConstant(enum_ty, un_val.unionTag(mod));
     }
     try sema.requireRuntimeBlock(block, un_src, null);
     return block.addTyOp(.get_union_tag, enum_ty, un);
@@ -31604,6 +31602,7 @@ pub fn resolveTypeRequiresComptime(sema: *Sema, ty: Type) CompileError!bool {
             .enum_type => |enum_type| try sema.resolveTypeRequiresComptime(enum_type.tag_ty.toType()),
 
             // values, not types
+            .undef => unreachable,
             .un => unreachable,
             .simple_value => unreachable,
             .extern_func => unreachable,
@@ -31731,6 +31730,7 @@ pub fn resolveTypeFields(sema: *Sema, ty: Type) CompileError!Type {
         .none => return ty,
 
         .u1_type,
+        .u5_type,
         .u8_type,
         .i8_type,
         .u16_type,
@@ -31790,6 +31790,8 @@ pub fn resolveTypeFields(sema: *Sema, ty: Type) CompileError!Type {
         .zero_u8 => unreachable,
         .one => unreachable,
         .one_usize => unreachable,
+        .one_u5 => unreachable,
+        .four_u5 => unreachable,
         .negative_one => unreachable,
         .calling_convention_c => unreachable,
         .calling_convention_inline => unreachable,
@@ -32606,7 +32608,7 @@ fn semaUnionFields(mod: *Module, union_obj: *Module.Union) CompileError!void {
         }
 
         if (explicit_enum_info) |tag_info| {
-            const enum_index = tag_info.nameIndex(mod.intern_pool, field_name_ip) orelse {
+            const enum_index = tag_info.nameIndex(&mod.intern_pool, field_name_ip) orelse {
                 const msg = msg: {
                     const ty_src = mod.fieldSrcLoc(union_obj.owner_decl, .{
                         .index = field_i,
@@ -33072,19 +33074,30 @@ pub fn typeHasOnePossibleValue(sema: *Sema, ty: Type) CompileError!?Value {
             .opaque_type => null,
             .enum_type => |enum_type| switch (enum_type.tag_mode) {
                 .nonexhaustive => {
-                    if (enum_type.tag_ty != .comptime_int_type and
-                        !(try sema.typeHasRuntimeBits(enum_type.tag_ty.toType())))
-                    {
-                        return Value.enum_field_0;
-                    } else {
-                        return null;
+                    if (enum_type.tag_ty == .comptime_int_type) return null;
+
+                    if (try sema.typeHasOnePossibleValue(enum_type.tag_ty.toType())) |int_opv| {
+                        const only = try mod.intern(.{ .enum_tag = .{
+                            .ty = ty.ip_index,
+                            .int = int_opv.ip_index,
+                        } });
+                        return only.toValue();
                     }
+
+                    return null;
                 },
                 .auto, .explicit => switch (enum_type.names.len) {
                     0 => return Value.@"unreachable",
                     1 => {
                         if (enum_type.values.len == 0) {
-                            return Value.enum_field_0; // auto-numbered
+                            const only = try mod.intern(.{ .enum_tag = .{
+                                .ty = ty.ip_index,
+                                .int = try mod.intern(.{ .int = .{
+                                    .ty = enum_type.tag_ty,
+                                    .storage = .{ .u64 = 0 },
+                                } }),
+                            } });
+                            return only.toValue();
                         } else {
                             return enum_type.values[0].toValue();
                         }
@@ -33094,6 +33107,7 @@ pub fn typeHasOnePossibleValue(sema: *Sema, ty: Type) CompileError!?Value {
             },
 
             // values, not types
+            .undef => unreachable,
             .un => unreachable,
             .simple_value => unreachable,
             .extern_func => unreachable,
@@ -33283,8 +33297,9 @@ pub fn analyzeAddressSpace(
     zir_ref: Zir.Inst.Ref,
     ctx: AddressSpaceContext,
 ) !std.builtin.AddressSpace {
+    const mod = sema.mod;
     const addrspace_tv = try sema.resolveInstConst(block, src, zir_ref, "addresspace must be comptime-known");
-    const address_space = addrspace_tv.val.toEnum(std.builtin.AddressSpace);
+    const address_space = mod.toEnum(std.builtin.AddressSpace, addrspace_tv.val);
     const target = sema.mod.getTarget();
     const arch = target.cpu.arch;
 
@@ -33652,6 +33667,7 @@ pub fn typeRequiresComptime(sema: *Sema, ty: Type) CompileError!bool {
             .enum_type => |enum_type| try sema.typeRequiresComptime(enum_type.tag_ty.toType()),
 
             // values, not types
+            .undef => unreachable,
             .un => unreachable,
             .simple_value => unreachable,
             .extern_func => unreachable,
@@ -33807,9 +33823,9 @@ fn numberAddWrapScalar(
     rhs: Value,
     ty: Type,
 ) !Value {
-    if (lhs.isUndef() or rhs.isUndef()) return Value.undef;
-
     const mod = sema.mod;
+    if (lhs.isUndef(mod) or rhs.isUndef(mod)) return Value.undef;
+
     if (ty.zigTypeTag(mod) == .ComptimeInt) {
         return sema.intAdd(lhs, rhs, ty);
     }
@@ -33861,9 +33877,9 @@ fn numberSubWrapScalar(
     rhs: Value,
     ty: Type,
 ) !Value {
-    if (lhs.isUndef() or rhs.isUndef()) return Value.undef;
-
     const mod = sema.mod;
+    if (lhs.isUndef(mod) or rhs.isUndef(mod)) return Value.undef;
+
     if (ty.zigTypeTag(mod) == .ComptimeInt) {
         return sema.intSub(lhs, rhs, ty);
     }
@@ -34108,17 +34124,12 @@ fn enumHasInt(sema: *Sema, ty: Type, int: Value) CompileError!bool {
     const mod = sema.mod;
     const enum_type = mod.intern_pool.indexToKey(ty.ip_index).enum_type;
     assert(enum_type.tag_mode != .nonexhaustive);
-    if (enum_type.values.len == 0) {
-        // auto-numbered
-        return sema.intInRange(enum_type.tag_ty.toType(), int, enum_type.names.len);
-    }
-
     // The `tagValueIndex` function call below relies on the type being the integer tag type.
     // `getCoerced` assumes the value will fit the new type.
     if (!(try sema.intFitsInType(int, enum_type.tag_ty.toType(), null))) return false;
     const int_coerced = try mod.intern_pool.getCoerced(sema.gpa, int.ip_index, enum_type.tag_ty);
 
-    return enum_type.tagValueIndex(mod.intern_pool, int_coerced) != null;
+    return enum_type.tagValueIndex(&mod.intern_pool, int_coerced) != null;
 }
 
 fn intAddWithOverflow(
