@@ -711,7 +711,7 @@ pub const DeclGen = struct {
                     else => |tag| return dg.todo("pointer value of type {s}", .{@tagName(tag)}),
                 },
                 .Struct => {
-                    if (ty.isSimpleTupleOrAnonStruct()) {
+                    if (ty.isSimpleTupleOrAnonStruct(mod)) {
                         unreachable; // TODO
                     } else {
                         const struct_ty = mod.typeToStruct(ty).?;
@@ -1270,44 +1270,46 @@ pub const DeclGen = struct {
                 return try self.spv.resolveType(SpvType.initPayload(&payload.base));
             },
             .Struct => {
-                if (ty.isSimpleTupleOrAnonStruct()) {
-                    const tuple = ty.tupleFields();
-                    const members = try self.spv.arena.alloc(SpvType.Payload.Struct.Member, tuple.types.len);
-                    var member_index: u32 = 0;
-                    for (tuple.types, 0..) |field_ty, i| {
-                        const field_val = tuple.values[i];
-                        if (field_val.ip_index != .unreachable_value or !field_ty.hasRuntimeBitsIgnoreComptime(mod)) continue;
-                        members[member_index] = .{
-                            .ty = try self.resolveType(field_ty, .indirect),
+                const struct_type = switch (mod.intern_pool.indexToKey(ty.ip_index)) {
+                    .anon_struct_type => |tuple| {
+                        const members = try self.spv.arena.alloc(SpvType.Payload.Struct.Member, tuple.types.len);
+                        var member_index: u32 = 0;
+                        for (tuple.types, tuple.values) |field_ty, field_val| {
+                            if (field_val != .none or !field_ty.toType().hasRuntimeBitsIgnoreComptime(mod)) continue;
+                            members[member_index] = .{
+                                .ty = try self.resolveType(field_ty.toType(), .indirect),
+                            };
+                            member_index += 1;
+                        }
+                        const payload = try self.spv.arena.create(SpvType.Payload.Struct);
+                        payload.* = .{
+                            .members = members[0..member_index],
                         };
-                        member_index += 1;
-                    }
-                    const payload = try self.spv.arena.create(SpvType.Payload.Struct);
-                    payload.* = .{
-                        .members = members[0..member_index],
-                    };
-                    return try self.spv.resolveType(SpvType.initPayload(&payload.base));
+                        return try self.spv.resolveType(SpvType.initPayload(&payload.base));
+                    },
+                    .struct_type => |s| s,
+                    else => unreachable,
+                };
+
+                const struct_obj = mod.structPtrUnwrap(struct_type.index).?;
+
+                if (struct_obj.layout == .Packed) {
+                    return try self.resolveType(struct_obj.backing_int_ty, .indirect);
                 }
 
-                const struct_ty = mod.typeToStruct(ty).?;
-
-                if (struct_ty.layout == .Packed) {
-                    return try self.resolveType(struct_ty.backing_int_ty, .indirect);
-                }
-
-                const members = try self.spv.arena.alloc(SpvType.Payload.Struct.Member, struct_ty.fields.count());
+                const members = try self.spv.arena.alloc(SpvType.Payload.Struct.Member, struct_obj.fields.count());
                 var member_index: usize = 0;
-                for (struct_ty.fields.values(), 0..) |field, i| {
+                for (struct_obj.fields.values(), 0..) |field, i| {
                     if (field.is_comptime or !field.ty.hasRuntimeBits(mod)) continue;
 
                     members[member_index] = .{
                         .ty = try self.resolveType(field.ty, .indirect),
-                        .name = struct_ty.fields.keys()[i],
+                        .name = struct_obj.fields.keys()[i],
                     };
                     member_index += 1;
                 }
 
-                const name = try struct_ty.getFullyQualifiedName(self.module);
+                const name = try struct_obj.getFullyQualifiedName(self.module);
                 defer self.module.gpa.free(name);
 
                 const payload = try self.spv.arena.create(SpvType.Payload.Struct);
@@ -1935,6 +1937,7 @@ pub const DeclGen = struct {
     fn airOverflowArithOp(self: *DeclGen, inst: Air.Inst.Index) !?IdRef {
         if (self.liveness.isUnused(inst)) return null;
 
+        const mod = self.module;
         const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
         const extra = self.air.extraData(Air.Bin, ty_pl.payload).data;
         const lhs = try self.resolve(extra.lhs);
@@ -1986,8 +1989,8 @@ pub const DeclGen = struct {
 
         // The overflow needs to be converted into whatever is used to represent it in Zig.
         const casted_overflow = blk: {
-            const ov_ty = result_ty.tupleFields().types[1];
-            const ov_ty_id = try self.resolveTypeId(ov_ty);
+            const ov_ty = mod.intern_pool.indexToKey(result_ty.ip_index).anon_struct_type.types[1];
+            const ov_ty_id = try self.resolveTypeId(ov_ty.toType());
             const result_id = self.spv.allocId();
             try self.func.body.emit(self.spv.gpa, .OpUConvert, .{
                 .id_result_type = ov_ty_id,
@@ -2035,7 +2038,7 @@ pub const DeclGen = struct {
 
         var i: usize = 0;
         while (i < mask_len) : (i += 1) {
-            const elem = try mask.elemValue(self.module, i);
+            const elem = try mask.elemValue(mod, i);
             if (elem.isUndef(mod)) {
                 self.func.body.writeOperand(spec.LiteralInteger, 0xFFFF_FFFF);
             } else {
@@ -2618,7 +2621,7 @@ pub const DeclGen = struct {
         const value = try self.resolve(bin_op.rhs);
         const ptr_ty_ref = try self.resolveType(ptr_ty, .direct);
 
-        const val_is_undef = if (try self.air.value(bin_op.rhs, mod)) |val| val.isUndefDeep() else false;
+        const val_is_undef = if (try self.air.value(bin_op.rhs, mod)) |val| val.isUndefDeep(mod) else false;
         if (val_is_undef) {
             const undef = try self.constUndef(ptr_ty_ref);
             try self.store(ptr_ty, ptr, undef);
