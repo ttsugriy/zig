@@ -702,8 +702,7 @@ pub const DeclGen = struct {
                     .slice => {
                         const slice = val.castTag(.slice).?.data;
 
-                        var buf: Type.SlicePtrFieldTypeBuffer = undefined;
-                        const ptr_ty = ty.slicePtrFieldType(&buf, mod);
+                        const ptr_ty = ty.slicePtrFieldType(mod);
 
                         try self.lower(ptr_ty, slice.ptr);
                         try self.addInt(Type.usize, slice.len);
@@ -2279,8 +2278,7 @@ pub const DeclGen = struct {
         const slice = try self.resolve(bin_op.lhs);
         const index = try self.resolve(bin_op.rhs);
 
-        var slice_buf: Type.SlicePtrFieldTypeBuffer = undefined;
-        const ptr_ty_id = try self.resolveTypeId(slice_ty.slicePtrFieldType(&slice_buf, mod));
+        const ptr_ty_id = try self.resolveTypeId(slice_ty.slicePtrFieldType(mod));
 
         const slice_ptr = blk: {
             const result_id = self.spv.allocId();
@@ -2812,9 +2810,8 @@ pub const DeclGen = struct {
         if (optional_ty.optionalReprIsPayload(mod)) {
             // Pointer payload represents nullability: pointer or slice.
 
-            var ptr_buf: Type.SlicePtrFieldTypeBuffer = undefined;
             const ptr_ty = if (payload_ty.isSlice(mod))
-                payload_ty.slicePtrFieldType(&ptr_buf, mod)
+                payload_ty.slicePtrFieldType(mod)
             else
                 payload_ty;
 
