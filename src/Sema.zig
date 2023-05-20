@@ -12616,7 +12616,7 @@ fn analyzeTupleCat(
     const runtime_src = opt_runtime_src orelse {
         const tuple_val = try mod.intern(.{ .aggregate = .{
             .ty = tuple_ty,
-            .fields = values,
+            .storage = .{ .elems = values },
         } });
         return sema.addConstant(tuple_ty.toType(), tuple_val.toValue());
     };
@@ -12934,7 +12934,7 @@ fn analyzeTupleMul(
     const runtime_src = opt_runtime_src orelse {
         const tuple_val = try mod.intern(.{ .aggregate = .{
             .ty = tuple_ty,
-            .fields = values,
+            .storage = .{ .elems = values },
         } });
         return sema.addConstant(tuple_ty.toType(), tuple_val.toValue());
     };
@@ -18162,7 +18162,7 @@ fn zirStructInitAnon(
     const runtime_index = opt_runtime_index orelse {
         const tuple_val = try mod.intern(.{ .aggregate = .{
             .ty = tuple_ty,
-            .fields = values,
+            .storage = .{ .elems = values },
         } });
         return sema.addConstantMaybeRef(block, tuple_ty.toType(), tuple_val.toValue(), is_ref);
     };
@@ -18377,7 +18377,7 @@ fn zirArrayInitAnon(
     const runtime_src = opt_runtime_src orelse {
         const tuple_val = try mod.intern(.{ .aggregate = .{
             .ty = tuple_ty,
-            .fields = values,
+            .storage = .{ .elems = values },
         } });
         return sema.addConstantMaybeRef(block, tuple_ty.toType(), tuple_val.toValue(), is_ref);
     };
@@ -29090,7 +29090,7 @@ fn coerceTupleToTuple(
         tuple_ty,
         (try mod.intern(.{ .aggregate = .{
             .ty = tuple_ty.ip_index,
-            .fields = field_vals,
+            .storage = .{ .elems = field_vals },
         } })).toValue(),
     );
 }
@@ -32971,7 +32971,7 @@ pub fn typeHasOnePossibleValue(sema: *Sema, ty: Type) CompileError!?Value {
                 // one-possible-value in type.zig.
                 const empty = try mod.intern(.{ .aggregate = .{
                     .ty = ty.ip_index,
-                    .fields = &.{},
+                    .storage = .{ .elems = &.{} },
                 } });
                 return empty.toValue();
             },
@@ -32984,7 +32984,7 @@ pub fn typeHasOnePossibleValue(sema: *Sema, ty: Type) CompileError!?Value {
                 // therefore has one possible value.
                 return (try mod.intern(.{ .aggregate = .{
                     .ty = ty.ip_index,
-                    .fields = tuple.values,
+                    .storage = .{ .elems = tuple.values },
                 } })).toValue();
             },
 
