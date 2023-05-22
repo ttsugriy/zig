@@ -226,7 +226,7 @@ const Job = union(enum) {
     /// Write the constant value for a Decl to the output file.
     codegen_decl: Module.Decl.Index,
     /// Write the machine code for a function to the output file.
-    codegen_func: *Module.Fn,
+    codegen_func: Module.Fn.Index,
     /// Render the .h file snippet for the Decl.
     emit_h_decl: Module.Decl.Index,
     /// The Decl needs to be analyzed and possibly export itself.
