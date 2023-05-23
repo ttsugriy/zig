@@ -1,98 +1,3 @@
-const Elf = @This();
-
-const std = @import("std");
-const build_options = @import("build_options");
-const builtin = @import("builtin");
-const assert = std.debug.assert;
-const elf = std.elf;
-const fs = std.fs;
-const log = std.log.scoped(.link);
-const math = std.math;
-const mem = std.mem;
-
-const codegen = @import("../codegen.zig");
-const glibc = @import("../glibc.zig");
-const link = @import("../link.zig");
-const lldMain = @import("../main.zig").lldMain;
-const musl = @import("../musl.zig");
-const target_util = @import("../target.zig");
-const trace = @import("../tracy.zig").trace;
-
-const Air = @import("../Air.zig");
-const Allocator = std.mem.Allocator;
-pub const Atom = @import("Elf/Atom.zig");
-const Cache = std.Build.Cache;
-const Compilation = @import("../Compilation.zig");
-const Dwarf = @import("Dwarf.zig");
-const File = link.File;
-const Liveness = @import("../Liveness.zig");
-const LlvmObject = @import("../codegen/llvm.zig").Object;
-const Module = @import("../Module.zig");
-const Package = @import("../Package.zig");
-const StringTable = @import("strtab.zig").StringTable;
-const TableSection = @import("table_section.zig").TableSection;
-const Type = @import("../type.zig").Type;
-const TypedValue = @import("../TypedValue.zig");
-const Value = @import("../value.zig").Value;
-
-const default_entry_addr = 0x8000000;
-
-pub const base_tag: File.Tag = .elf;
-
-const Section = struct {
-    shdr: elf.Elf64_Shdr,
-    phdr_index: u16,
-
-    /// Index of the last allocated atom in this section.
-    last_atom_index: ?Atom.Index = null,
-
-    /// A list of atoms that have surplus capacity. This list can have false
-    /// positives, as functions grow and shrink over time, only sometimes being added
-    /// or removed from the freelist.
-    ///
-    /// An atom has surplus capacity when its overcapacity value is greater than
-    /// padToIdeal(minimum_atom_size). That is, when it has so
-    /// much extra capacity, that we could fit a small new symbol in it, itself with
-    /// ideal_capacity or more.
-    ///
-    /// Ideal capacity is defined by size + (size / ideal_factor)
-    ///
-    /// Overcapacity is measured by actual_capacity - ideal_capacity. Note that
-    /// overcapacity can be negative. A simple way to have negative overcapacity is to
-    /// allocate a fresh text block, which will have ideal capacity, and then grow it
-    /// by 1 byte. It will then have -1 overcapacity.
-    free_list: std.ArrayListUnmanaged(Atom.Index) = .{},
-};
-
-const LazySymbolMetadata = struct {
-    const State = enum { unused, pending_flush, flushed };
-    text_atom: Atom.Index = undefined,
-    rodata_atom: Atom.Index = undefined,
-    text_state: State = .unused,
-    rodata_state: State = .unused,
-};
-
-const DeclMetadata = struct {
-    atom: Atom.Index,
-    shdr: u16,
-    /// A list of all exports aliases of this Decl.
-    exports: std.ArrayListUnmanaged(u32) = .{},
-
-    fn getExport(m: DeclMetadata, elf_file: *const Elf, name: []const u8) ?u32 {
-        for (m.exports.items) |exp| {
-            if (mem.eql(u8, name, elf_file.getGlobalName(exp))) return exp;
-        }
-        return null;
-    }
-
-    fn getExportPtr(m: *DeclMetadata, elf_file: *Elf, name: []const u8) ?*u32 {
-        for (m.exports.items) |*exp| {
-            if (mem.eql(u8, name, elf_file.getGlobalName(exp.*))) return exp;
-        }
-        return null;
-    }
-};
-
 base: File,
 dwarf: ?Dwarf = null,
 
@@ -204,22 +109,6 @@ unnamed_const_atoms: UnnamedConstTable = .{},
 /// Note that once we refactor `TextBlock`'s lifetime and ownership rules,
 /// this will be a table indexed by index into the list of Atoms.
 relocs: RelocTable = .{},
-
-const RelocTable = std.AutoHashMapUnmanaged(Atom.Index, std.ArrayListUnmanaged(Atom.Reloc));
-const UnnamedConstTable = std.AutoHashMapUnmanaged(Module.Decl.Index, std.ArrayListUnmanaged(Atom.Index));
-const LazySymbolTable = std.AutoArrayHashMapUnmanaged(Module.Decl.OptionalIndex, LazySymbolMetadata);
-
-/// When allocating, the ideal_capacity is calculated by
-/// actual_capacity + (actual_capacity / ideal_factor)
-const ideal_factor = 3;
-
-/// In order for a slice of bytes to be considered eligible to keep metadata pointing at
-/// it as a possible place to put new symbols, it must have enough room for this many bytes
-/// (plus extra for reserved capacity).
-const minimum_atom_size = 64;
-pub const min_text_capacity = padToIdeal(minimum_atom_size);
-
-pub const PtrWidth = enum { p32, p64 };
 
 pub fn openPath(allocator: Allocator, sub_path: []const u8, options: link.Options) !*Elf {
     assert(options.target.ofmt == .elf);
@@ -3515,3 +3404,114 @@ pub fn getAtomPtr(self: *Elf, atom_index: Atom.Index) *Atom {
 pub fn getAtomIndexForSymbol(self: *Elf, sym_index: u32) ?Atom.Index {
     return self.atom_by_index_table.get(sym_index);
 }
+
+const Section = struct {
+    shdr: elf.Elf64_Shdr,
+    phdr_index: u16,
+
+    /// Index of the last allocated atom in this section.
+    last_atom_index: ?Atom.Index = null,
+
+    /// A list of atoms that have surplus capacity. This list can have false
+    /// positives, as functions grow and shrink over time, only sometimes being added
+    /// or removed from the freelist.
+    ///
+    /// An atom has surplus capacity when its overcapacity value is greater than
+    /// padToIdeal(minimum_atom_size). That is, when it has so
+    /// much extra capacity, that we could fit a small new symbol in it, itself with
+    /// ideal_capacity or more.
+    ///
+    /// Ideal capacity is defined by size + (size / ideal_factor)
+    ///
+    /// Overcapacity is measured by actual_capacity - ideal_capacity. Note that
+    /// overcapacity can be negative. A simple way to have negative overcapacity is to
+    /// allocate a fresh text block, which will have ideal capacity, and then grow it
+    /// by 1 byte. It will then have -1 overcapacity.
+    free_list: std.ArrayListUnmanaged(Atom.Index) = .{},
+};
+
+const LazySymbolMetadata = struct {
+    const State = enum { unused, pending_flush, flushed };
+    text_atom: Atom.Index = undefined,
+    rodata_atom: Atom.Index = undefined,
+    text_state: State = .unused,
+    rodata_state: State = .unused,
+};
+
+const DeclMetadata = struct {
+    atom: Atom.Index,
+    shdr: u16,
+    /// A list of all exports aliases of this Decl.
+    exports: std.ArrayListUnmanaged(u32) = .{},
+
+    fn getExport(m: DeclMetadata, elf_file: *const Elf, name: []const u8) ?u32 {
+        for (m.exports.items) |exp| {
+            if (mem.eql(u8, name, elf_file.getGlobalName(exp))) return exp;
+        }
+        return null;
+    }
+
+    fn getExportPtr(m: *DeclMetadata, elf_file: *Elf, name: []const u8) ?*u32 {
+        for (m.exports.items) |*exp| {
+            if (mem.eql(u8, name, elf_file.getGlobalName(exp.*))) return exp;
+        }
+        return null;
+    }
+};
+
+const RelocTable = std.AutoHashMapUnmanaged(Atom.Index, std.ArrayListUnmanaged(Atom.Reloc));
+const UnnamedConstTable = std.AutoHashMapUnmanaged(Module.Decl.Index, std.ArrayListUnmanaged(Atom.Index));
+const LazySymbolTable = std.AutoArrayHashMapUnmanaged(Module.Decl.OptionalIndex, LazySymbolMetadata);
+
+pub const PtrWidth = enum { p32, p64 };
+
+pub const base_tag: File.Tag = .elf;
+
+const default_entry_addr = 0x8000000;
+
+/// When allocating, the ideal_capacity is calculated by
+/// actual_capacity + (actual_capacity / ideal_factor)
+const ideal_factor = 3;
+
+/// In order for a slice of bytes to be considered eligible to keep metadata pointing at
+/// it as a possible place to put new symbols, it must have enough room for this many bytes
+/// (plus extra for reserved capacity).
+const minimum_atom_size = 64;
+pub const min_text_capacity = padToIdeal(minimum_atom_size);
+
+const Elf = @This();
+
+const std = @import("std");
+const build_options = @import("build_options");
+const builtin = @import("builtin");
+const assert = std.debug.assert;
+const elf = std.elf;
+const fs = std.fs;
+const log = std.log.scoped(.link);
+const math = std.math;
+const mem = std.mem;
+
+const codegen = @import("../codegen.zig");
+const glibc = @import("../glibc.zig");
+const link = @import("../link.zig");
+const lldMain = @import("../main.zig").lldMain;
+const musl = @import("../musl.zig");
+const target_util = @import("../target.zig");
+const trace = @import("../tracy.zig").trace;
+
+const Air = @import("../Air.zig");
+const Allocator = std.mem.Allocator;
+pub const Atom = @import("Elf/Atom.zig");
+const Cache = std.Build.Cache;
+const Compilation = @import("../Compilation.zig");
+const Dwarf = @import("Dwarf.zig");
+const File = link.File;
+const Liveness = @import("../Liveness.zig");
+const LlvmObject = @import("../codegen/llvm.zig").Object;
+const Module = @import("../Module.zig");
+const Package = @import("../Package.zig");
+const StringTable = @import("strtab.zig").StringTable;
+const TableSection = @import("table_section.zig").TableSection;
+const Type = @import("../type.zig").Type;
+const TypedValue = @import("../TypedValue.zig");
+const Value = @import("../value.zig").Value;
