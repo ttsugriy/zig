@@ -1776,7 +1776,6 @@ pub const DeclGen = struct {
             .br             => return self.airBr(inst),
             .breakpoint     => return,
             .cond_br        => return self.airCondBr(inst),
-            .constant       => unreachable,
             .dbg_stmt       => return self.airDbgStmt(inst),
             .loop           => return self.airLoop(inst),
             .ret            => return self.airRet(inst),
