@@ -5804,7 +5804,7 @@ pub fn analyzeExport(
     }
 
     // This decl is alive no matter what, since it's being exported
-    mod.markDeclAlive(exported_decl);
+    try mod.markDeclAlive(exported_decl);
 
     const gpa = sema.gpa;
 
