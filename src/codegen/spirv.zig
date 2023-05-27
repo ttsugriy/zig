@@ -687,7 +687,7 @@ pub const DeclGen = struct {
                     .@"unreachable",
                     .generic_poison,
                     => unreachable, // non-runtime values
-                    .false, .true => try self.addConstBool(val.toBool(mod)),
+                    .false, .true => try self.addConstBool(val.toBool()),
                 },
                 .variable,
                 .extern_func,
@@ -1029,7 +1029,7 @@ pub const DeclGen = struct {
             },
             .Bool => {
                 const operands = .{ .id_result_type = result_ty_id, .id_result = result_id };
-                if (val.toBool(mod)) {
+                if (val.toBool()) {
                     try section.emit(self.spv.gpa, .OpConstantTrue, operands);
                 } else {
                     try section.emit(self.spv.gpa, .OpConstantFalse, operands);
