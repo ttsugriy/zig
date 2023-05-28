@@ -734,6 +734,7 @@ pub const Block = struct {
             errdefer sema.mod.abortAnonDecl(new_decl_index);
             try new_decl.finalizeNewArena(&wad.new_decl_arena);
             wad.finished = true;
+            try sema.mod.finalizeAnonDecl(new_decl_index);
             return new_decl_index;
         }
     };
@@ -2292,7 +2293,7 @@ fn failWithOwnedErrorMsg(sema: *Sema, err_msg: *Module.ErrorMsg) CompileError {
         defer reference_stack.deinit();
 
         // Avoid infinite loops.
-        var seen = std.AutoHashMap(Module.Decl.Index, void).init(gpa);
+        var seen = std.AutoHashMap(Decl.Index, void).init(gpa);
         defer seen.deinit();
 
         var cur_reference_trace: u32 = 0;
@@ -2741,7 +2742,9 @@ fn zirStructDecl(
 
     try sema.analyzeStructDecl(new_decl, inst, struct_index);
     try new_decl.finalizeNewArena(&new_decl_arena);
-    return sema.analyzeDeclVal(block, src, new_decl_index);
+    const decl_val = sema.analyzeDeclVal(block, src, new_decl_index);
+    try mod.finalizeAnonDecl(new_decl_index);
+    return decl_val;
 }
 
 fn createAnonymousDeclTypeNamed(
@@ -2940,6 +2943,7 @@ fn zirEnumDecl(
     new_namespace.ty = incomplete_enum.index.toType();
 
     const decl_val = try sema.analyzeDeclVal(block, src, new_decl_index);
+    try mod.finalizeAnonDecl(new_decl_index);
     done = true;
 
     const int_tag_ty = ty: {
@@ -3192,7 +3196,9 @@ fn zirUnionDecl(
     _ = try mod.scanNamespace(new_namespace_index, extra_index, decls_len, new_decl);
 
     try new_decl.finalizeNewArena(&new_decl_arena);
-    return sema.analyzeDeclVal(block, src, new_decl_index);
+    const decl_val = sema.analyzeDeclVal(block, src, new_decl_index);
+    try mod.finalizeAnonDecl(new_decl_index);
+    return decl_val;
 }
 
 fn zirOpaqueDecl(
@@ -3256,7 +3262,9 @@ fn zirOpaqueDecl(
     extra_index = try mod.scanNamespace(new_namespace_index, extra_index, decls_len, new_decl);
 
     try new_decl.finalizeNewArena(&new_decl_arena);
-    return sema.analyzeDeclVal(block, src, new_decl_index);
+    const decl_val = sema.analyzeDeclVal(block, src, new_decl_index);
+    try mod.finalizeAnonDecl(new_decl_index);
+    return decl_val;
 }
 
 fn zirErrorSetDecl(
@@ -3297,7 +3305,9 @@ fn zirErrorSetDecl(
     new_decl.owns_tv = true;
     errdefer mod.abortAnonDecl(new_decl_index);
 
-    return sema.analyzeDeclVal(block, src, new_decl_index);
+    const decl_val = sema.analyzeDeclVal(block, src, new_decl_index);
+    try mod.finalizeAnonDecl(new_decl_index);
+    return decl_val;
 }
 
 fn zirRetPtr(sema: *Sema, block: *Block) CompileError!Air.Inst.Ref {
@@ -5130,32 +5140,35 @@ fn zirStr(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Ins
     return sema.addStrLit(block, bytes);
 }
 
-fn addStrLit(sema: *Sema, block: *Block, zir_bytes: []const u8) CompileError!Air.Inst.Ref {
-    // `zir_bytes` references memory inside the ZIR module, which can get deallocated
-    // after semantic analysis is complete, for example in the case of the initialization
-    // expression of a variable declaration.
+fn addStrLit(sema: *Sema, block: *Block, bytes: []const u8) CompileError!Air.Inst.Ref {
     const mod = sema.mod;
-    const gpa = sema.gpa;
-    const ty = try mod.arrayType(.{
-        .len = zir_bytes.len,
-        .child = .u8_type,
-        .sentinel = .zero_u8,
-    });
-    const val = try mod.intern(.{ .aggregate = .{
-        .ty = ty.toIntern(),
-        .storage = .{ .bytes = zir_bytes },
-    } });
-    const gop = try mod.memoized_decls.getOrPut(gpa, val);
-    if (!gop.found_existing) {
-        var anon_decl = try block.startAnonDecl();
-        defer anon_decl.deinit();
+    const memoized_decl_index = memoized: {
+        const ty = try mod.arrayType(.{
+            .len = bytes.len,
+            .child = .u8_type,
+            .sentinel = .zero_u8,
+        });
+        const val = try mod.intern(.{ .aggregate = .{
+            .ty = ty.toIntern(),
+            .storage = .{ .bytes = bytes },
+        } });
 
-        const decl_index = try anon_decl.finish(ty, val.toValue(), 0);
+        _ = try sema.typeHasRuntimeBits(ty);
+        const new_decl_index = try mod.createAnonymousDecl(block, .{ .ty = ty, .val = val.toValue() });
+        errdefer mod.abortAnonDecl(new_decl_index);
 
-        gop.key_ptr.* = val;
-        gop.value_ptr.* = decl_index;
-    }
-    return sema.analyzeDeclRef(gop.value_ptr.*);
+        const memoized_index = try mod.intern(.{ .memoized_decl = .{
+            .val = val,
+            .decl = new_decl_index,
+        } });
+        const memoized_decl_index = mod.intern_pool.indexToKey(memoized_index).memoized_decl.decl;
+        if (memoized_decl_index != new_decl_index)
+            mod.abortAnonDecl(new_decl_index)
+        else
+            try mod.finalizeAnonDecl(new_decl_index);
+        break :memoized memoized_decl_index;
+    };
+    return sema.analyzeDeclRef(memoized_decl_index);
 }
 
 fn zirInt(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
@@ -6848,29 +6861,14 @@ fn analyzeCall(
         defer child_block.instructions.deinit(gpa);
         defer merges.deinit(gpa);
 
-        // If it's a comptime function call, we need to memoize it as long as no external
-        // comptime memory is mutated.
-        var memoized_call_key = Module.MemoizedCall.Key{
-            .func = module_fn_index,
-            .args_index = @intCast(u32, mod.memoized_call_args.items.len),
-            .args_count = @intCast(u32, func_ty_info.param_types.len),
-        };
-        var delete_memoized_call_key = false;
-        defer if (delete_memoized_call_key) {
-            assert(mod.memoized_call_args.items.len >= memoized_call_key.args_index and
-                mod.memoized_call_args.items.len < memoized_call_key.args_index + memoized_call_key.args_count);
-            mod.memoized_call_args.shrinkRetainingCapacity(memoized_call_key.args_index);
-        };
-        if (is_comptime_call) {
-            try mod.memoized_call_args.ensureUnusedCapacity(gpa, memoized_call_key.args_count);
-            delete_memoized_call_key = true;
-        }
-
         try sema.emitBackwardBranch(block, call_src);
 
-        // Whether this call should be memoized, set to false if the call can mutate
-        // comptime state.
+        // Whether this call should be memoized, set to false if the call can mutate comptime state.
         var should_memoize = true;
+
+        // If it's a comptime function call, we need to memoize it as long as no external
+        // comptime memory is mutated.
+        const memoized_arg_values = try sema.arena.alloc(InternPool.Index, func_ty_info.param_types.len);
 
         var new_fn_info = mod.typeToFunc(fn_owner_decl.ty).?;
         new_fn_info.param_types = try sema.arena.alloc(InternPool.Index, new_fn_info.param_types.len);
@@ -6898,6 +6896,7 @@ fn analyzeCall(
                 uncasted_args,
                 is_comptime_call,
                 &should_memoize,
+                memoized_arg_values,
                 mod.typeToFunc(func_ty).?.param_types,
                 func,
                 &has_comptime_args,
@@ -6915,6 +6914,7 @@ fn analyzeCall(
                         uncasted_args,
                         is_comptime_call,
                         &should_memoize,
+                        memoized_arg_values,
                         mod.typeToFunc(func_ty).?.param_types,
                         func,
                         &has_comptime_args,
@@ -6968,28 +6968,18 @@ fn analyzeCall(
         // bug generating invalid LLVM IR.
         const res2: Air.Inst.Ref = res2: {
             if (should_memoize and is_comptime_call) {
-                const gop = try mod.memoized_calls.getOrPutContext(
-                    gpa,
-                    memoized_call_key,
-                    .{ .args = &mod.memoized_call_args },
-                );
-                if (gop.found_existing) {
-                    assert(mod.memoized_call_args.items.len == memoized_call_key.args_index + memoized_call_key.args_count);
-                    mod.memoized_call_args.shrinkRetainingCapacity(memoized_call_key.args_index);
-                    delete_memoized_call_key = false;
-
-                    // We need to use the original memoized error set instead of fn_ret_ty.
-                    const result = gop.value_ptr.*;
-                    assert(result != .none); // recursive memoization?
-
-                    break :res2 try sema.addConstant(mod.intern_pool.typeOf(result).toType(), result.toValue());
+                if (mod.intern_pool.getIfExists(.{ .memoized_call = .{
+                    .func = module_fn_index,
+                    .arg_values = memoized_arg_values,
+                    .result = .none,
+                } })) |memoized_call_index| {
+                    const memoized_call = mod.intern_pool.indexToKey(memoized_call_index).memoized_call;
+                    break :res2 try sema.addConstant(
+                        mod.intern_pool.typeOf(memoized_call.result).toType(),
+                        memoized_call.result.toValue(),
+                    );
                 }
-                gop.value_ptr.* = .none;
-            } else if (delete_memoized_call_key) {
-                assert(mod.memoized_call_args.items.len == memoized_call_key.args_index + memoized_call_key.args_count);
-                mod.memoized_call_args.shrinkRetainingCapacity(memoized_call_key.args_index);
             }
-            delete_memoized_call_key = false;
 
             const new_func_resolved_ty = try mod.funcType(new_fn_info);
             if (!is_comptime_call and !block.is_typeof) {
@@ -7047,10 +7037,14 @@ fn analyzeCall(
 
             if (should_memoize and is_comptime_call) {
                 const result_val = try sema.resolveConstMaybeUndefVal(block, .unneeded, result, "");
-                mod.memoized_calls.getPtrContext(
-                    memoized_call_key,
-                    .{ .args = &mod.memoized_call_args },
-                ).?.* = try result_val.intern(fn_ret_ty, mod);
+
+                // TODO: check whether any external comptime memory was mutated by the
+                // comptime function call. If so, then do not memoize the call here.
+                _ = try mod.intern(.{ .memoized_call = .{
+                    .func = module_fn_index,
+                    .arg_values = memoized_arg_values,
+                    .result = try result_val.intern(fn_ret_ty, mod),
+                } });
             }
 
             break :res2 result;
@@ -7167,6 +7161,7 @@ fn analyzeInlineCallArg(
     uncasted_args: []const Air.Inst.Ref,
     is_comptime_call: bool,
     should_memoize: *bool,
+    memoized_arg_values: []InternPool.Index,
     raw_param_types: []const InternPool.Index,
     func_inst: Air.Inst.Ref,
     has_comptime_args: *bool,
@@ -7230,7 +7225,7 @@ fn analyzeInlineCallArg(
                     },
                 }
                 should_memoize.* = should_memoize.* and !arg_val.canMutateComptimeVarState(mod);
-                mod.memoized_call_args.appendAssumeCapacity(try arg_val.intern(param_ty.toType(), mod));
+                memoized_arg_values[arg_i.*] = try arg_val.intern(param_ty.toType(), mod);
             } else {
                 sema.inst_map.putAssumeCapacityNoClobber(inst, casted_arg);
             }
@@ -7266,7 +7261,7 @@ fn analyzeInlineCallArg(
                     },
                 }
                 should_memoize.* = should_memoize.* and !arg_val.canMutateComptimeVarState(mod);
-                mod.memoized_call_args.appendAssumeCapacity(try arg_val.intern(sema.typeOf(uncasted_arg), mod));
+                memoized_arg_values[arg_i.*] = try arg_val.intern(sema.typeOf(uncasted_arg), mod);
             } else {
                 if (zir_tags[inst] == .param_anytype_comptime) {
                     _ = try sema.resolveConstMaybeUndefVal(arg_block, arg_src, uncasted_arg, "parameter is comptime");
@@ -19297,7 +19292,9 @@ fn zirReify(
                 }
             }
 
-            return sema.analyzeDeclVal(block, src, new_decl_index);
+            const decl_val = sema.analyzeDeclVal(block, src, new_decl_index);
+            try mod.finalizeAnonDecl(new_decl_index);
+            return decl_val;
         },
         .Opaque => {
             const fields = ip.typeOf(union_val.val).toType().structFields(mod);
@@ -19341,7 +19338,9 @@ fn zirReify(
             new_namespace.ty = opaque_ty.toType();
 
             try new_decl.finalizeNewArena(&new_decl_arena);
-            return sema.analyzeDeclVal(block, src, new_decl_index);
+            const decl_val = sema.analyzeDeclVal(block, src, new_decl_index);
+            try mod.finalizeAnonDecl(new_decl_index);
+            return decl_val;
         },
         .Union => {
             const fields = ip.typeOf(union_val.val).toType().structFields(mod);
@@ -19538,7 +19537,9 @@ fn zirReify(
             }
 
             try new_decl.finalizeNewArena(&new_decl_arena);
-            return sema.analyzeDeclVal(block, src, new_decl_index);
+            const decl_val = sema.analyzeDeclVal(block, src, new_decl_index);
+            try mod.finalizeAnonDecl(new_decl_index);
+            return decl_val;
         },
         .Fn => {
             const fields = ip.typeOf(union_val.val).toType().structFields(mod);
@@ -19836,7 +19837,9 @@ fn reifyStruct(
     }
 
     try new_decl.finalizeNewArena(&new_decl_arena);
-    return sema.analyzeDeclVal(block, src, new_decl_index);
+    const decl_val = sema.analyzeDeclVal(block, src, new_decl_index);
+    try mod.finalizeAnonDecl(new_decl_index);
+    return decl_val;
 }
 
 fn zirAddrSpaceCast(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstData) CompileError!Air.Inst.Ref {
@@ -31750,6 +31753,9 @@ pub fn resolveTypeRequiresComptime(sema: *Sema, ty: Type) CompileError!bool {
             .opt,
             .aggregate,
             .un,
+            // memoization, not types
+            .memoized_decl,
+            .memoized_call,
             => unreachable,
         },
     };
@@ -32882,6 +32888,8 @@ fn generateUnionTagTypeNumbered(
         .ty = Type.type,
         .val = undefined,
     }, name);
+    errdefer mod.abortAnonDecl(new_decl_index);
+
     const new_decl = mod.declPtr(new_decl_index);
     new_decl.name_fully_qualified = true;
     new_decl.owns_tv = true;
@@ -32901,6 +32909,7 @@ fn generateUnionTagTypeNumbered(
 
     new_decl.val = enum_ty.toValue();
 
+    try mod.finalizeAnonDecl(new_decl_index);
     return enum_ty.toType();
 }
 
@@ -32934,6 +32943,7 @@ fn generateUnionTagTypeSimple(
         mod.declPtr(new_decl_index).name_fully_qualified = true;
         break :new_decl_index new_decl_index;
     };
+    errdefer mod.abortAnonDecl(new_decl_index);
 
     const enum_ty = try mod.intern(.{ .enum_type = .{
         .decl = new_decl_index,
@@ -32951,6 +32961,7 @@ fn generateUnionTagTypeSimple(
     new_decl.owns_tv = true;
     new_decl.val = enum_ty.toValue();
 
+    try mod.finalizeAnonDecl(new_decl_index);
     return enum_ty.toType();
 }
 
@@ -33243,6 +33254,9 @@ pub fn typeHasOnePossibleValue(sema: *Sema, ty: Type) CompileError!?Value {
             .opt,
             .aggregate,
             .un,
+            // memoization, not types
+            .memoized_decl,
+            .memoized_call,
             => unreachable,
         },
     };
@@ -33728,6 +33742,9 @@ pub fn typeRequiresComptime(sema: *Sema, ty: Type) CompileError!bool {
             .opt,
             .aggregate,
             .un,
+            // memoization, not types
+            .memoized_decl,
+            .memoized_call,
             => unreachable,
         },
     };
