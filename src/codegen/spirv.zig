@@ -373,7 +373,7 @@ pub const DeclGen = struct {
                 };
             },
             .Enum => blk: {
-                const int_ty = try ty.intTagType(mod);
+                const int_ty = ty.intTagType(mod);
                 const int_info = int_ty.intInfo(mod);
                 break :blk ArithmeticTypeInfo{
                     .bits = int_info.bits,
@@ -733,7 +733,7 @@ pub const DeclGen = struct {
                 .enum_tag => {
                     const int_val = try val.enumToInt(ty, mod);
 
-                    const int_ty = try ty.intTagType(mod);
+                    const int_ty = ty.intTagType(mod);
 
                     try self.lower(int_ty, int_val);
                 },
@@ -1190,7 +1190,7 @@ pub const DeclGen = struct {
                 return try self.intType(int_info.signedness, int_info.bits);
             },
             .Enum => {
-                const tag_ty = try ty.intTagType(mod);
+                const tag_ty = ty.intTagType(mod);
                 return self.resolveType(tag_ty, repr);
             },
             .Float => {
@@ -2927,7 +2927,7 @@ pub const DeclGen = struct {
                 break :blk if (backing_bits <= 32) @as(u32, 1) else 2;
             },
             .Enum => blk: {
-                const int_ty = try cond_ty.intTagType(mod);
+                const int_ty = cond_ty.intTagType(mod);
                 const int_info = int_ty.intInfo(mod);
                 const backing_bits = self.backingIntBits(int_info.bits) orelse {
                     return self.todo("implement composite int switch", .{});

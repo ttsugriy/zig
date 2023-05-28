@@ -3290,7 +3290,8 @@ fn zirErrorSetDecl(
     while (extra_index < extra_index_end) : (extra_index += 2) { // +2 to skip over doc_string
         const str_index = sema.code.extra[extra_index];
         const name = sema.code.nullTerminatedString(str_index);
-        const name_ip = try mod.intern_pool.getOrPutString(gpa, name);
+        const kv = try mod.getErrorValue(name);
+        const name_ip = try mod.intern_pool.getOrPutString(gpa, kv.key);
         const result = names.getOrPutAssumeCapacity(name_ip);
         assert(!result.found_existing); // verified in AstGen
     }
@@ -6419,7 +6420,7 @@ fn zirCall(
 
         // Generate args to comptime params in comptime block.
         defer block.is_comptime = parent_comptime;
-        if (arg_index < fn_params_len and func_ty_info.paramIsComptime(@intCast(u5, arg_index))) {
+        if (arg_index < @min(fn_params_len, 32) and func_ty_info.paramIsComptime(@intCast(u5, arg_index))) {
             block.is_comptime = true;
             // TODO set comptime_reason
         }
@@ -7057,14 +7058,13 @@ fn analyzeCall(
         assert(!func_ty_info.is_generic);
 
         const args = try sema.arena.alloc(Air.Inst.Ref, uncasted_args.len);
-        const fn_info = mod.typeToFunc(func_ty).?;
         for (uncasted_args, 0..) |uncasted_arg, i| {
             if (i < fn_params_len) {
                 const opts: CoerceOpts = .{ .param_src = .{
                     .func_inst = func,
                     .param_i = @intCast(u32, i),
                 } };
-                const param_ty = fn_info.param_types[i].toType();
+                const param_ty = mod.typeToFunc(func_ty).?.param_types[i].toType();
                 args[i] = sema.analyzeCallArg(
                     block,
                     .unneeded,
@@ -8211,7 +8211,7 @@ fn zirEnumToInt(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
     };
     const enum_tag_ty = sema.typeOf(enum_tag);
 
-    const int_tag_ty = try enum_tag_ty.intTagType(mod);
+    const int_tag_ty = enum_tag_ty.intTagType(mod);
 
     if (try sema.typeHasOnePossibleValue(enum_tag_ty)) |opv| {
         return sema.addConstant(int_tag_ty, try mod.getCoerced(opv, int_tag_ty));
@@ -8243,12 +8243,9 @@ fn zirIntToEnum(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
 
     if (try sema.resolveMaybeUndefVal(operand)) |int_val| {
         if (dest_ty.isNonexhaustiveEnum(mod)) {
-            const int_tag_ty = try dest_ty.intTagType(mod);
+            const int_tag_ty = dest_ty.intTagType(mod);
             if (try sema.intFitsInType(int_val, int_tag_ty, null)) {
-                return sema.addConstant(dest_ty, (try mod.intern(.{ .enum_tag = .{
-                    .ty = dest_ty.toIntern(),
-                    .int = int_val.toIntern(),
-                } })).toValue());
+                return sema.addConstant(dest_ty, try mod.getCoerced(int_val, dest_ty));
             }
             const msg = msg: {
                 const msg = try sema.errMsg(
@@ -8280,7 +8277,7 @@ fn zirIntToEnum(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
             };
             return sema.failWithOwnedErrorMsg(msg);
         }
-        return sema.addConstant(dest_ty, int_val);
+        return sema.addConstant(dest_ty, try mod.getCoerced(int_val, dest_ty));
     }
 
     if (try sema.typeHasOnePossibleValue(dest_ty)) |opv| {
@@ -9457,7 +9454,7 @@ fn zirPtrToInt(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
         return sema.fail(block, ptr_src, "expected pointer, found '{}'", .{ptr_ty.fmt(sema.mod)});
     }
     if (try sema.resolveMaybeUndefValIntable(ptr)) |ptr_val| {
-        return sema.addConstant(Type.usize, ptr_val);
+        return sema.addConstant(Type.usize, try mod.getCoerced(ptr_val, Type.usize));
     }
     try sema.requireRuntimeBlock(block, inst_data.src(), ptr_src);
     return block.addUnOp(.ptrtoint, ptr);
@@ -9595,7 +9592,7 @@ fn intCast(
         // range shrinkage
         // requirement: int value fits into target type
         if (wanted_value_bits < actual_value_bits) {
-            const dest_max_val_scalar = try dest_scalar_ty.maxIntScalar(mod, operand_ty);
+            const dest_max_val_scalar = try dest_scalar_ty.maxIntScalar(mod, operand_scalar_ty);
             const dest_max_val = try sema.splat(operand_ty, dest_max_val_scalar);
             const dest_max = try sema.addConstant(operand_ty, dest_max_val);
             const diff = try block.addBinOp(.subwrap, dest_max, operand);
@@ -12792,7 +12789,7 @@ fn zirArrayCat(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
         if (res_sent_val) |sent_val| {
             const elem_index = try sema.addIntUnsigned(Type.usize, result_len);
             const elem_ptr = try block.addPtrElemPtr(alloc, elem_index, elem_ptr_ty);
-            const init = try sema.addConstant(lhs_info.elem_type, sent_val);
+            const init = try sema.addConstant(lhs_info.elem_type, try mod.getCoerced(sent_val, lhs_info.elem_type));
             try sema.storePtr2(block, src, elem_ptr, src, init, lhs_src, .store);
         }
 
@@ -19170,7 +19167,8 @@ fn zirReify(
                 const name_val = try elem_val.fieldValue(mod, elem_fields.getIndex("name").?);
 
                 const name_str = try name_val.toAllocatedBytes(Type.slice_const_u8, sema.arena, mod);
-                const name_ip = try mod.intern_pool.getOrPutString(gpa, name_str);
+                const kv = try mod.getErrorValue(name_str);
+                const name_ip = try mod.intern_pool.getOrPutString(gpa, kv.key);
                 const gop = names.getOrPutAssumeCapacity(name_ip);
                 if (gop.found_existing) {
                     return sema.fail(block, src, "duplicate error '{s}'", .{name_str});
@@ -19280,7 +19278,7 @@ fn zirReify(
                     return sema.failWithOwnedErrorMsg(msg);
                 }
 
-                if (try incomplete_enum.addFieldValue(&mod.intern_pool, gpa, value_val.toIntern())) |other| {
+                if (try incomplete_enum.addFieldValue(&mod.intern_pool, gpa, (try mod.getCoerced(value_val, int_tag_ty)).toIntern())) |other| {
                     const msg = msg: {
                         const msg = try sema.errMsg(block, src, "enum tag value {} already taken", .{value_val.fmtValue(Type.comptime_int, mod)});
                         errdefer msg.destroy(gpa);
@@ -20187,7 +20185,7 @@ fn zirErrSetCast(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstDat
             }
         }
 
-        return sema.addConstant(dest_ty, val);
+        return sema.addConstant(dest_ty, try mod.getCoerced(val, dest_ty));
     }
 
     try sema.requireRuntimeBlock(block, src, operand_src);
@@ -20345,7 +20343,7 @@ fn zirConstCast(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstData
     const dest_ty = try Type.ptr(sema.arena, mod, ptr_info);
 
     if (try sema.resolveMaybeUndefVal(operand)) |operand_val| {
-        return sema.addConstant(dest_ty, operand_val);
+        return sema.addConstant(dest_ty, try mod.getCoerced(operand_val, dest_ty));
     }
 
     try sema.requireRuntimeBlock(block, src, null);
@@ -20548,7 +20546,7 @@ fn zirBitCount(
                 for (elems, 0..) |*elem, i| {
                     const elem_val = try val.elemValue(mod, i);
                     const count = comptimeOp(elem_val, scalar_ty, mod);
-                    elem.* = (try mod.intValue(scalar_ty, count)).toIntern();
+                    elem.* = (try mod.intValue(result_scalar_ty, count)).toIntern();
                 }
                 return sema.addConstant(result_ty, (try mod.intern(.{ .aggregate = .{
                     .ty = result_ty.toIntern(),
@@ -22315,7 +22313,9 @@ fn analyzeMinMax(
             if (std.debug.runtime_safety) {
                 assert(try sema.intFitsInType(val, refined_ty, null));
             }
-            cur_minmax = try sema.addConstant(refined_ty, try mod.getCoerced(val, refined_ty));
+            cur_minmax = try sema.addConstant(refined_ty, (try sema.resolveMaybeUndefVal(
+                try sema.coerceInMemory(block, val, orig_ty, refined_ty, src),
+            )).?);
         }
 
         break :refined refined_ty;
@@ -23604,7 +23604,7 @@ fn validateExternType(
             return !target_util.fnCallConvAllowsZigTypes(target, ty.fnCallingConvention(mod));
         },
         .Enum => {
-            return sema.validateExternType(try ty.intTagType(mod), position);
+            return sema.validateExternType(ty.intTagType(mod), position);
         },
         .Struct, .Union => switch (ty.containerLayout(mod)) {
             .Extern => return true,
@@ -23674,7 +23674,7 @@ fn explainWhyTypeIsNotExtern(
             }
         },
         .Enum => {
-            const tag_ty = try ty.intTagType(mod);
+            const tag_ty = ty.intTagType(mod);
             try mod.errNoteNonLazy(src_loc, msg, "enum tag type '{}' is not extern compatible", .{tag_ty.fmt(sema.mod)});
             try sema.explainWhyTypeIsNotExtern(msg, src_loc, tag_ty, position);
         },
@@ -25325,7 +25325,8 @@ fn elemVal(
                     const elem_ptr_ty = try sema.elemPtrType(indexable_ty, index);
                     const elem_ptr_val = try indexable_val.elemPtr(elem_ptr_ty, index, mod);
                     if (try sema.pointerDeref(block, indexable_src, elem_ptr_val, elem_ptr_ty)) |elem_val| {
-                        return sema.addConstant(indexable_ty.elemType2(mod), elem_val);
+                        const result_ty = indexable_ty.elemType2(mod);
+                        return sema.addConstant(result_ty, try mod.getCoerced(elem_val, result_ty));
                     }
                     break :rs indexable_src;
                 };
@@ -26516,6 +26517,10 @@ fn coerceInMemory(
                 .storage = .{ .elems = dest_elems },
             } })).toValue());
         },
+        .float => |float| return sema.addConstant(dst_ty, (try mod.intern(.{ .float = .{
+            .ty = dst_ty.toIntern(),
+            .storage = float.storage,
+        } })).toValue()),
         else => return sema.addConstant(dst_ty, try mod.getCoerced(val, dst_ty)),
     }
 }
@@ -26896,8 +26901,11 @@ fn coerceInMemoryAllowed(
     if (dest_ty.eql(src_ty, mod))
         return .ok;
 
+    const dest_tag = dest_ty.zigTypeTag(mod);
+    const src_tag = src_ty.zigTypeTag(mod);
+
     // Differently-named integers with the same number of bits.
-    if (dest_ty.zigTypeTag(mod) == .Int and src_ty.zigTypeTag(mod) == .Int) {
+    if (dest_tag == .Int and src_tag == .Int) {
         const dest_info = dest_ty.intInfo(mod);
         const src_info = src_ty.intInfo(mod);
 
@@ -26922,7 +26930,7 @@ fn coerceInMemoryAllowed(
     }
 
     // Differently-named floats with the same number of bits.
-    if (dest_ty.zigTypeTag(mod) == .Float and src_ty.zigTypeTag(mod) == .Float) {
+    if (dest_tag == .Float and src_tag == .Float) {
         const dest_bits = dest_ty.floatBits(target);
         const src_bits = src_ty.floatBits(target);
         if (dest_bits == src_bits) {
@@ -26943,9 +26951,6 @@ fn coerceInMemoryAllowed(
     if (dest_ty.isSlice(mod) and src_ty.isSlice(mod)) {
         return try sema.coerceInMemoryAllowedPtrs(block, dest_ty, src_ty, dest_ty, src_ty, dest_is_mut, target, dest_src, src_src);
     }
-
-    const dest_tag = dest_ty.zigTypeTag(mod);
-    const src_tag = src_ty.zigTypeTag(mod);
 
     // Functions
     if (dest_tag == .Fn and src_tag == .Fn) {
@@ -27721,7 +27726,7 @@ fn beginComptimePtrMutation(
         .comptime_field => |comptime_field| {
             const duped = try sema.arena.create(Value);
             duped.* = comptime_field.toValue();
-            return sema.beginComptimePtrMutationInner(block, src, mod.intern_pool.typeOf(ptr_val.toIntern()).toType(), duped, ptr_elem_ty, .{
+            return sema.beginComptimePtrMutationInner(block, src, mod.intern_pool.typeOf(comptime_field).toType(), duped, ptr_elem_ty, .{
                 .decl = undefined,
                 .runtime_index = .comptime_field_ptr,
             });
@@ -27777,7 +27782,21 @@ fn beginComptimePtrMutation(
                 .direct => |val_ptr| {
                     const payload_ty = parent.ty.optionalChild(mod);
                     switch (val_ptr.ip_index) {
-                        .undef, .null_value => {
+                        .none => return ComptimePtrMutationKit{
+                            .mut_decl = parent.mut_decl,
+                            .pointee = .{ .direct = &val_ptr.castTag(.opt_payload).?.data },
+                            .ty = payload_ty,
+                        },
+                        else => {
+                            const payload_val = switch (mod.intern_pool.indexToKey(val_ptr.ip_index)) {
+                                .undef => try mod.intern(.{ .undef = payload_ty.toIntern() }),
+                                .opt => |opt| switch (opt.val) {
+                                    .none => try mod.intern(.{ .undef = payload_ty.toIntern() }),
+                                    else => opt.val,
+                                },
+                                else => unreachable,
+                            };
+
                             // An optional has been initialized to undefined at comptime and now we
                             // are for the first time setting the payload. We must change the
                             // representation of the optional from `undef` to `opt_payload`.
@@ -27787,7 +27806,7 @@ fn beginComptimePtrMutation(
                             const payload = try arena.create(Value.Payload.SubValue);
                             payload.* = .{
                                 .base = .{ .tag = .opt_payload },
-                                .data = (try mod.intern(.{ .undef = payload_ty.toIntern() })).toValue(),
+                                .data = payload_val.toValue(),
                             };
 
                             val_ptr.* = Value.initPayload(&payload.base);
@@ -27797,24 +27816,6 @@ fn beginComptimePtrMutation(
                                 .pointee = .{ .direct = &payload.data },
                                 .ty = payload_ty,
                             };
-                        },
-                        .none => switch (val_ptr.tag()) {
-                            .opt_payload => return ComptimePtrMutationKit{
-                                .mut_decl = parent.mut_decl,
-                                .pointee = .{ .direct = &val_ptr.castTag(.opt_payload).?.data },
-                                .ty = payload_ty,
-                            },
-
-                            else => return ComptimePtrMutationKit{
-                                .mut_decl = parent.mut_decl,
-                                .pointee = .{ .direct = val_ptr },
-                                .ty = payload_ty,
-                            },
-                        },
-                        else => return ComptimePtrMutationKit{
-                            .mut_decl = parent.mut_decl,
-                            .pointee = .{ .direct = val_ptr },
-                            .ty = payload_ty,
                         },
                     }
                 },
@@ -33224,16 +33225,20 @@ pub fn typeHasOnePossibleValue(sema: *Sema, ty: Type) CompileError!?Value {
 
                     return null;
                 },
-                .auto, .explicit => switch (enum_type.names.len) {
-                    0 => return Value.@"unreachable",
-                    1 => return try mod.getCoerced((if (enum_type.values.len == 0)
-                        try mod.intern(.{ .int = .{
-                            .ty = enum_type.tag_ty,
-                            .storage = .{ .u64 = 0 },
-                        } })
-                    else
-                        enum_type.values[0]).toValue(), ty),
-                    else => return null,
+                .auto, .explicit => {
+                    if (enum_type.tag_ty.toType().hasRuntimeBits(mod)) return null;
+
+                    switch (enum_type.names.len) {
+                        0 => return Value.@"unreachable",
+                        1 => return try mod.getCoerced((if (enum_type.values.len == 0)
+                            try mod.intern(.{ .int = .{
+                                .ty = enum_type.tag_ty,
+                                .storage = .{ .u64 = 0 },
+                            } })
+                        else
+                            enum_type.values[0]).toValue(), ty),
+                        else => return null,
+                    }
                 },
             },
 
@@ -34126,13 +34131,9 @@ fn intFitsInType(
     if (ty.toIntern() == .comptime_int_type) return true;
     const info = ty.intInfo(mod);
     switch (val.toIntern()) {
-        .undef,
-        .zero,
-        .zero_usize,
-        .zero_u8,
-        => return true,
-
+        .zero_usize, .zero_u8 => return true,
         else => switch (mod.intern_pool.indexToKey(val.toIntern())) {
+            .undef => return true,
             .variable, .extern_func, .func, .ptr => {
                 const target = mod.getTarget();
                 const ptr_bits = target.cpu.arch.ptrBitWidth();
@@ -34438,7 +34439,7 @@ fn isNoReturn(sema: *Sema, ref: Air.Inst.Ref) bool {
     return sema.typeOf(ref).isNoReturn(sema.mod);
 }
 
-/// Avoids crashing the compiler when asking if inferred allocations are known to be a certain type.
+/// Avoids crashing the compiler when asking if inferred allocations are known to be a certain zig type.
 fn isKnownZigType(sema: *Sema, ref: Air.Inst.Ref, tag: std.builtin.TypeId) bool {
     if (Air.refToIndex(ref)) |inst| switch (sema.air_instructions.items(.tag)[inst]) {
         .inferred_alloc, .inferred_alloc_comptime => return false,
