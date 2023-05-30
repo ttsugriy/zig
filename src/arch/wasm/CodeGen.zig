@@ -2046,7 +2046,7 @@ fn genBody(func: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
     const ip = &mod.intern_pool;
 
     for (body) |inst| {
-        if (func.liveness.isUnused(inst) and !func.air.mustLower(inst, ip.*)) {
+        if (func.liveness.isUnused(inst) and !func.air.mustLower(inst, ip)) {
             continue;
         }
         const old_bookkeeping_value = func.air_bookkeeping;
@@ -7086,10 +7086,10 @@ fn airAtomicStore(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
 fn typeOf(func: *CodeGen, inst: Air.Inst.Ref) Type {
     const mod = func.bin_file.base.options.module.?;
-    return func.air.typeOf(inst, mod.intern_pool);
+    return func.air.typeOf(inst, &mod.intern_pool);
 }
 
 fn typeOfIndex(func: *CodeGen, inst: Air.Inst.Index) Type {
     const mod = func.bin_file.base.options.module.?;
-    return func.air.typeOfIndex(inst, mod.intern_pool);
+    return func.air.typeOfIndex(inst, &mod.intern_pool);
 }
