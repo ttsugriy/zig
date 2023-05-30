@@ -749,8 +749,8 @@ test "peer type resolution: disjoint error sets" {
         try expect(error_set_info == .ErrorSet);
         try expect(error_set_info.ErrorSet.?.len == 3);
         try expect(mem.eql(u8, error_set_info.ErrorSet.?[0].name, "One"));
-        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "Three"));
-        try expect(mem.eql(u8, error_set_info.ErrorSet.?[2].name, "Two"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "Two"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[2].name, "Three"));
     }
 
     {
@@ -759,8 +759,8 @@ test "peer type resolution: disjoint error sets" {
         try expect(error_set_info == .ErrorSet);
         try expect(error_set_info.ErrorSet.?.len == 3);
         try expect(mem.eql(u8, error_set_info.ErrorSet.?[0].name, "One"));
-        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "Three"));
-        try expect(mem.eql(u8, error_set_info.ErrorSet.?[2].name, "Two"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "Two"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[2].name, "Three"));
     }
 }
 
@@ -781,8 +781,8 @@ test "peer type resolution: error union and error set" {
         const error_set_info = @typeInfo(info.ErrorUnion.error_set);
         try expect(error_set_info.ErrorSet.?.len == 3);
         try expect(mem.eql(u8, error_set_info.ErrorSet.?[0].name, "One"));
-        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "Three"));
-        try expect(mem.eql(u8, error_set_info.ErrorSet.?[2].name, "Two"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "Two"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[2].name, "Three"));
     }
 
     {
@@ -793,8 +793,8 @@ test "peer type resolution: error union and error set" {
         const error_set_info = @typeInfo(info.ErrorUnion.error_set);
         try expect(error_set_info.ErrorSet.?.len == 3);
         try expect(mem.eql(u8, error_set_info.ErrorSet.?[0].name, "One"));
-        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "Three"));
-        try expect(mem.eql(u8, error_set_info.ErrorSet.?[2].name, "Two"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[1].name, "Two"));
+        try expect(mem.eql(u8, error_set_info.ErrorSet.?[2].name, "Three"));
     }
 }
 
