@@ -2447,7 +2447,7 @@ pub const Const = struct {
         return total_limb_lz + bits - total_limb_bits;
     }
 
-    pub fn ctz(a: Const) Limb {
+    pub fn ctz(a: Const, bits: Limb) Limb {
         // Limbs are stored in little-endian order.
         var result: Limb = 0;
         for (a.limbs) |limb| {
@@ -2455,7 +2455,7 @@ pub const Const = struct {
             result += limb_tz;
             if (limb_tz != @sizeOf(Limb) * 8) break;
         }
-        return result;
+        return @min(result, bits);
     }
 };
 
