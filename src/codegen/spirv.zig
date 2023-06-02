@@ -626,7 +626,6 @@ pub const DeclGen = struct {
                 .extern_func => unreachable, // TODO
                 else => {
                     const result_id = dg.spv.allocId();
-                    log.debug("addDeclRef: id = {}, index = {}, name = {s}", .{ result_id.id, @enumToInt(spv_decl_index), decl.name });
 
                     try self.decl_deps.put(spv_decl_index, {});
 
@@ -697,9 +696,8 @@ pub const DeclGen = struct {
                 => unreachable, // non-runtime values
                 .int => try self.addInt(ty, val),
                 .err => |err| {
-                    const name = mod.intern_pool.stringToSlice(err.name);
-                    const kv = try mod.getErrorValue(name);
-                    try self.addConstInt(u16, @intCast(u16, kv.value));
+                    const int = try mod.getErrorValue(err.name);
+                    try self.addConstInt(u16, @intCast(u16, int));
                 },
                 .error_union => |error_union| {
                     const payload_ty = ty.errorUnionPayload(mod);
@@ -1312,13 +1310,12 @@ pub const DeclGen = struct {
 
                     members[member_index] = .{
                         .ty = try self.resolveType(field.ty, .indirect),
-                        .name = struct_obj.fields.keys()[i],
+                        .name = mod.intern_pool.stringToSlice(struct_obj.fields.keys()[i]),
                     };
                     member_index += 1;
                 }
 
-                const name = try struct_obj.getFullyQualifiedName(self.module);
-                defer self.module.gpa.free(name);
+                const name = mod.intern_pool.stringToSlice(try struct_obj.getFullyQualifiedName(self.module));
 
                 const payload = try self.spv.arena.create(SpvType.Payload.Struct);
                 payload.* = .{
@@ -1521,7 +1518,6 @@ pub const DeclGen = struct {
         const spv_decl_index = try self.resolveDecl(self.decl_index);
 
         const decl_id = self.spv.declPtr(spv_decl_index).result_id;
-        log.debug("genDecl: id = {}, index = {}, name = {s}", .{ decl_id.id, @enumToInt(spv_decl_index), decl.name });
 
         if (decl.val.getFunction(mod)) |_| {
             assert(decl.ty.zigTypeTag(mod) == .Fn);
@@ -1563,8 +1559,7 @@ pub const DeclGen = struct {
             try self.func.body.emit(self.spv.gpa, .OpFunctionEnd, {});
             try self.spv.addFunction(spv_decl_index, self.func);
 
-            const fqn = try decl.getFullyQualifiedName(self.module);
-            defer self.module.gpa.free(fqn);
+            const fqn = mod.intern_pool.stringToSlice(try decl.getFullyQualifiedName(self.module));
 
             try self.spv.sections.debug_names.emit(self.gpa, .OpName, .{
                 .target = decl_id,

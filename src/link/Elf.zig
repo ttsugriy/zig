@@ -28,6 +28,7 @@ const File = link.File;
 const Liveness = @import("../Liveness.zig");
 const LlvmObject = @import("../codegen/llvm.zig").Object;
 const Module = @import("../Module.zig");
+const InternPool = @import("../InternPool.zig");
 const Package = @import("../Package.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const TableSection = @import("table_section.zig").TableSection;
@@ -2472,8 +2473,7 @@ fn updateDeclCode(self: *Elf, decl_index: Module.Decl.Index, code: []const u8, s
     const mod = self.base.options.module.?;
     const decl = mod.declPtr(decl_index);
 
-    const decl_name = try decl.getFullyQualifiedName(mod);
-    defer self.base.allocator.free(decl_name);
+    const decl_name = mod.intern_pool.stringToSlice(try decl.getFullyQualifiedName(mod));
 
     log.debug("updateDeclCode {s}{*}", .{ decl_name, decl });
     const required_alignment = decl.getAlignment(mod);
@@ -2794,8 +2794,7 @@ pub fn lowerUnnamedConst(self: *Elf, typed_value: TypedValue, decl_index: Module
 
     const decl = mod.declPtr(decl_index);
     const name_str_index = blk: {
-        const decl_name = try decl.getFullyQualifiedName(mod);
-        defer gpa.free(decl_name);
+        const decl_name = mod.intern_pool.stringToSlice(try decl.getFullyQualifiedName(mod));
         const index = unnamed_consts.items.len;
         const name = try std.fmt.allocPrint(gpa, "__unnamed_{s}_{d}", .{ decl_name, index });
         defer gpa.free(name);
@@ -2872,7 +2871,8 @@ pub fn updateDeclExports(
     try self.global_symbols.ensureUnusedCapacity(gpa, exports.len);
 
     for (exports) |exp| {
-        if (exp.options.section) |section_name| {
+        const exp_name = mod.intern_pool.stringToSlice(exp.name);
+        if (mod.intern_pool.stringToSliceUnwrap(exp.section)) |section_name| {
             if (!mem.eql(u8, section_name, ".text")) {
                 try mod.failed_exports.ensureUnusedCapacity(mod.gpa, 1);
                 mod.failed_exports.putAssumeCapacityNoClobber(
@@ -2882,11 +2882,11 @@ pub fn updateDeclExports(
                 continue;
             }
         }
-        const stb_bits: u8 = switch (exp.options.linkage) {
+        const stb_bits: u8 = switch (exp.linkage) {
             .Internal => elf.STB_LOCAL,
             .Strong => blk: {
                 const entry_name = self.base.options.entry orelse "_start";
-                if (mem.eql(u8, exp.options.name, entry_name)) {
+                if (mem.eql(u8, exp_name, entry_name)) {
                     self.entry_addr = decl_sym.st_value;
                 }
                 break :blk elf.STB_GLOBAL;
@@ -2902,10 +2902,10 @@ pub fn updateDeclExports(
             },
         };
         const stt_bits: u8 = @truncate(u4, decl_sym.st_info);
-        if (decl_metadata.getExport(self, exp.options.name)) |i| {
+        if (decl_metadata.getExport(self, exp_name)) |i| {
             const sym = &self.global_symbols.items[i];
             sym.* = .{
-                .st_name = try self.shstrtab.insert(gpa, exp.options.name),
+                .st_name = try self.shstrtab.insert(gpa, exp_name),
                 .st_info = (stb_bits << 4) | stt_bits,
                 .st_other = 0,
                 .st_shndx = shdr_index,
@@ -2919,7 +2919,7 @@ pub fn updateDeclExports(
             };
             try decl_metadata.exports.append(gpa, @intCast(u32, i));
             self.global_symbols.items[i] = .{
-                .st_name = try self.shstrtab.insert(gpa, exp.options.name),
+                .st_name = try self.shstrtab.insert(gpa, exp_name),
                 .st_info = (stb_bits << 4) | stt_bits,
                 .st_other = 0,
                 .st_shndx = shdr_index,
@@ -2936,8 +2936,7 @@ pub fn updateDeclLineNumber(self: *Elf, mod: *Module, decl_index: Module.Decl.In
     defer tracy.end();
 
     const decl = mod.declPtr(decl_index);
-    const decl_name = try decl.getFullyQualifiedName(mod);
-    defer self.base.allocator.free(decl_name);
+    const decl_name = mod.intern_pool.stringToSlice(try decl.getFullyQualifiedName(mod));
 
     log.debug("updateDeclLineNumber {s}{*}", .{ decl_name, decl });
 
@@ -2947,11 +2946,15 @@ pub fn updateDeclLineNumber(self: *Elf, mod: *Module, decl_index: Module.Decl.In
     }
 }
 
-pub fn deleteDeclExport(self: *Elf, decl_index: Module.Decl.Index, name: []const u8) void {
+pub fn deleteDeclExport(
+    self: *Elf,
+    decl_index: Module.Decl.Index,
+    name: InternPool.NullTerminatedString,
+) void {
     if (self.llvm_object) |_| return;
     const metadata = self.decls.getPtr(decl_index) orelse return;
-    const sym_index = metadata.getExportPtr(self, name) orelse return;
-    log.debug("deleting export '{s}'", .{name});
+    const mod = self.base.options.module.?;
+    const sym_index = metadata.getExportPtr(self, mod.intern_pool.stringToSlice(name)) orelse return;
     self.global_symbol_free_list.append(self.base.allocator, sym_index.*) catch {};
     self.global_symbols.items[sym_index.*].st_info = 0;
     sym_index.* = 0;
