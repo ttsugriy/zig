@@ -702,24 +702,15 @@ pub const Block = struct {
     pub fn startAnonDecl(block: *Block) !WipAnonDecl {
         return WipAnonDecl{
             .block = block,
-            .new_decl_arena = std.heap.ArenaAllocator.init(block.sema.gpa),
             .finished = false,
         };
     }
 
     pub const WipAnonDecl = struct {
         block: *Block,
-        new_decl_arena: std.heap.ArenaAllocator,
         finished: bool,
 
-        pub fn arena(wad: *WipAnonDecl) Allocator {
-            return wad.new_decl_arena.allocator();
-        }
-
         pub fn deinit(wad: *WipAnonDecl) void {
-            if (!wad.finished) {
-                wad.new_decl_arena.deinit();
-            }
             wad.* = undefined;
         }
 
@@ -2773,9 +2764,6 @@ fn zirStructDecl(
         break :blk LazySrcLoc.nodeOffset(node_offset);
     } else sema.src;
 
-    var new_decl_arena = std.heap.ArenaAllocator.init(gpa);
-    errdefer new_decl_arena.deinit();
-
     // Because these three things each reference each other, `undefined`
     // placeholders are used before being set after the struct type gains an
     // InternPool index.
@@ -3229,9 +3217,6 @@ fn zirUnionDecl(
         break :blk decls_len;
     } else 0;
 
-    var new_decl_arena = std.heap.ArenaAllocator.init(gpa);
-    errdefer new_decl_arena.deinit();
-
     // Because these three things each reference each other, `undefined`
     // placeholders are used before being set after the union type gains an
     // InternPool index.
@@ -3296,7 +3281,6 @@ fn zirOpaqueDecl(
     defer tracy.end();
 
     const mod = sema.mod;
-    const gpa = sema.gpa;
     const small = @bitCast(Zir.Inst.OpaqueDecl.Small, extended.small);
     var extra_index: usize = extended.operand;
 
@@ -3311,9 +3295,6 @@ fn zirOpaqueDecl(
         extra_index += 1;
         break :blk decls_len;
     } else 0;
-
-    var new_decl_arena = std.heap.ArenaAllocator.init(gpa);
-    errdefer new_decl_arena.deinit();
 
     // Because these three things each reference each other, `undefined`
     // placeholders are used in two places before being set after the opaque
@@ -3690,7 +3671,7 @@ fn zirMakePtrConst(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileErro
         defer anon_decl.deinit();
         return sema.analyzeDeclRef(try anon_decl.finish(
             elem_ty,
-            try store_val.copy(anon_decl.arena()),
+            store_val,
             ptr_info.@"align",
         ));
     }
@@ -3935,7 +3916,7 @@ fn zirResolveInferredAlloc(sema: *Sema, block: *Block, inst: Zir.Inst.Index) Com
                     defer anon_decl.deinit();
                     const new_decl_index = try anon_decl.finish(
                         final_elem_ty,
-                        try store_val.copy(anon_decl.arena()),
+                        store_val,
                         ia1.alignment.toByteUnits(0),
                     );
                     break :d new_decl_index;
@@ -5165,7 +5146,7 @@ fn storeToInferredAllocComptime(
         defer anon_decl.deinit();
         iac.decl_index = try anon_decl.finish(
             operand_ty,
-            try operand_val.copy(anon_decl.arena()),
+            operand_val,
             iac.alignment.toByteUnits(0),
         );
         return;
@@ -5857,7 +5838,7 @@ fn zirExportValue(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError
         defer anon_decl.deinit();
         break :blk try anon_decl.finish(
             operand.ty,
-            try operand.val.copy(anon_decl.arena()),
+            operand.val,
             0,
         );
     };
@@ -15840,7 +15821,7 @@ fn zirBuiltinSrc(
         var anon_decl = try block.startAnonDecl();
         defer anon_decl.deinit();
         // The compiler must not call realpath anywhere.
-        const name = try fn_owner_decl.getFileScope(mod).fullPathZ(anon_decl.arena());
+        const name = try fn_owner_decl.getFileScope(mod).fullPathZ(sema.arena);
         const new_decl_ty = try mod.arrayType(.{
             .len = name.len,
             .child = .u8_type,
@@ -18727,7 +18708,7 @@ fn addConstantMaybeRef(
     defer anon_decl.deinit();
     const decl = try anon_decl.finish(
         ty,
-        try val.copy(anon_decl.arena()),
+        val,
         0, // default alignment
     );
     return sema.analyzeDeclRef(decl);
@@ -19450,9 +19431,6 @@ fn zirReify(
                 return sema.fail(block, src, "reified opaque must have no decls", .{});
             }
 
-            var new_decl_arena = std.heap.ArenaAllocator.init(gpa);
-            errdefer new_decl_arena.deinit();
-
             // Because these three things each reference each other,
             // `undefined` placeholders are used in two places before being set
             // after the opaque type gains an InternPool index.
@@ -19506,10 +19484,6 @@ fn zirReify(
                 return sema.fail(block, src, "reified unions must have no decls", .{});
             }
             const layout = mod.toEnum(std.builtin.Type.ContainerLayout, layout_val);
-
-            var new_decl_arena = std.heap.ArenaAllocator.init(gpa);
-            errdefer new_decl_arena.deinit();
-            const new_decl_arena_allocator = new_decl_arena.allocator();
 
             // Because these three things each reference each other, `undefined`
             // placeholders are used before being set after the union type gains an
@@ -19580,7 +19554,7 @@ fn zirReify(
             }
 
             // Fields
-            try union_obj.fields.ensureTotalCapacity(new_decl_arena_allocator, fields_len);
+            try union_obj.fields.ensureTotalCapacity(mod.tmp_hack_arena.allocator(), fields_len);
 
             for (0..fields_len) |i| {
                 const elem_val = try fields_val.elemValue(mod, i);
@@ -19808,10 +19782,6 @@ fn reifyStruct(
     const gpa = sema.gpa;
     const ip = &mod.intern_pool;
 
-    var new_decl_arena = std.heap.ArenaAllocator.init(gpa);
-    errdefer new_decl_arena.deinit();
-    const new_decl_arena_allocator = new_decl_arena.allocator();
-
     // Because these three things each reference each other, `undefined`
     // placeholders are used before being set after the struct type gains an
     // InternPool index.
@@ -19856,7 +19826,7 @@ fn reifyStruct(
 
     // Fields
     const fields_len = try sema.usizeCast(block, src, fields_val.sliceLen(mod));
-    try struct_obj.fields.ensureTotalCapacity(new_decl_arena_allocator, fields_len);
+    try struct_obj.fields.ensureTotalCapacity(mod.tmp_hack_arena.allocator(), fields_len);
     var i: usize = 0;
     while (i < fields_len) : (i += 1) {
         const elem_val = try fields_val.elemValue(mod, i);
@@ -20144,7 +20114,7 @@ fn zirTypeName(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
     var anon_decl = try block.startAnonDecl();
     defer anon_decl.deinit();
 
-    const bytes = try ty.nameAllocArena(anon_decl.arena(), mod);
+    const bytes = try ty.nameAllocArena(sema.arena, mod);
 
     const decl_ty = try mod.arrayType(.{
         .len = bytes.len,
@@ -29654,7 +29624,7 @@ fn refValue(sema: *Sema, block: *Block, ty: Type, val: Value) !Value {
     defer anon_decl.deinit();
     const decl = try anon_decl.finish(
         ty,
-        try val.copy(anon_decl.arena()),
+        val,
         0, // default alignment
     );
     try mod.declareDeclDependency(sema.owner_decl_index, decl);
@@ -29716,7 +29686,7 @@ fn analyzeRef(
         defer anon_decl.deinit();
         return sema.analyzeDeclRef(try anon_decl.finish(
             operand_ty,
-            try val.copy(anon_decl.arena()),
+            val,
             0, // default alignment
         ));
     }
