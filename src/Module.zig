@@ -4365,6 +4365,9 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
         defer sema_arena.deinit();
         const sema_arena_allocator = sema_arena.allocator();
 
+        var comptime_mutable_decls = std.ArrayList(Decl.Index).init(gpa);
+        defer comptime_mutable_decls.deinit();
+
         var sema: Sema = .{
             .mod = mod,
             .gpa = gpa,
@@ -4378,6 +4381,7 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
             .fn_ret_ty = Type.void,
             .owner_func = null,
             .owner_func_index = .none,
+            .comptime_mutable_decls = &comptime_mutable_decls,
         };
         defer sema.deinit();
 
@@ -4386,6 +4390,10 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
 
         if (sema.analyzeStructDecl(new_decl, main_struct_inst, struct_index)) |_| {
             try wip_captures.finalize();
+            for (comptime_mutable_decls.items) |decl_index| {
+                const decl = mod.declPtr(decl_index);
+                try decl.intern(mod);
+            }
             new_decl.analysis = .complete;
         } else |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -4463,6 +4471,9 @@ fn semaDecl(mod: *Module, decl_index: Decl.Index) !bool {
     defer analysis_arena.deinit();
     const analysis_arena_allocator = analysis_arena.allocator();
 
+    var comptime_mutable_decls = std.ArrayList(Decl.Index).init(gpa);
+    defer comptime_mutable_decls.deinit();
+
     var sema: Sema = .{
         .mod = mod,
         .gpa = gpa,
@@ -4476,6 +4487,7 @@ fn semaDecl(mod: *Module, decl_index: Decl.Index) !bool {
         .fn_ret_ty = Type.void,
         .owner_func = null,
         .owner_func_index = .none,
+        .comptime_mutable_decls = &comptime_mutable_decls,
     };
     defer sema.deinit();
 
@@ -4518,6 +4530,10 @@ fn semaDecl(mod: *Module, decl_index: Decl.Index) !bool {
     const body = zir.extra[extra.end..][0..extra.data.body_len];
     const result_ref = (try sema.analyzeBodyBreak(&block_scope, body)).?.operand;
     try wip_captures.finalize();
+    for (comptime_mutable_decls.items) |ct_decl_index| {
+        const ct_decl = mod.declPtr(ct_decl_index);
+        try ct_decl.intern(mod);
+    }
     const align_src: LazySrcLoc = .{ .node_offset_var_decl_align = 0 };
     const section_src: LazySrcLoc = .{ .node_offset_var_decl_section = 0 };
     const address_space_src: LazySrcLoc = .{ .node_offset_var_decl_addrspace = 0 };
@@ -5441,6 +5457,9 @@ pub fn analyzeFnBody(mod: *Module, func_index: Fn.Index, arena: Allocator) SemaE
     const decl_arena_allocator = decl.value_arena.?.acquire(gpa, &decl_arena);
     defer decl.value_arena.?.release(&decl_arena);
 
+    var comptime_mutable_decls = std.ArrayList(Decl.Index).init(gpa);
+    defer comptime_mutable_decls.deinit();
+
     const fn_ty = decl.ty;
     const fn_ty_info = mod.typeToFunc(fn_ty).?;
 
@@ -5458,6 +5477,7 @@ pub fn analyzeFnBody(mod: *Module, func_index: Fn.Index, arena: Allocator) SemaE
         .owner_func = func,
         .owner_func_index = func_index.toOptional(),
         .branch_quota = @max(func.branch_quota, Sema.default_branch_quota),
+        .comptime_mutable_decls = &comptime_mutable_decls,
     };
     defer sema.deinit();
 
@@ -5597,6 +5617,10 @@ pub fn analyzeFnBody(mod: *Module, func_index: Fn.Index, arena: Allocator) SemaE
     }
 
     try wip_captures.finalize();
+    for (comptime_mutable_decls.items) |ct_decl_index| {
+        const ct_decl = mod.declPtr(ct_decl_index);
+        try ct_decl.intern(mod);
+    }
 
     // Copy the block into place and mark that as the main block.
     try sema.air_extra.ensureUnusedCapacity(gpa, @typeInfo(Air.Block).Struct.fields.len +
